@@ -1,0 +1,19 @@
+[package]
+name = "cedfs-proto"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bincode = { workspace = true }
+chrono = { workspace = true }
+derive_builder = { workspace = true }
+iota = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tonic = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

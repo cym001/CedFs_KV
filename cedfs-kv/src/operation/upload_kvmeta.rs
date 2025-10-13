@@ -1,0 +1,45 @@
+use std::collections::HashMap;
+
+use anyhow::Ok;
+
+use crate::Shared;
+use crate::types::{KvBlockMeta};
+
+pub struct UploadKvMetaOp {
+    pub kv_meta: Vec<KvBlockMeta>,
+    pub kv_ref: HashMap<u64, u64>,
+    pub shared: Shared,
+}
+
+impl UploadKvMetaOp {
+    pub fn run(&self) -> anyhow::Result<()>{
+        // 更新本地kv元数据
+        for block in self.kv_meta.iter() {
+            if block.phy_size == 0{
+                let _ = Self::delete_replica(self, block.clone());
+            }
+            else{
+                self.shared.insert_local_kvcache(block.clone());
+            }
+            
+        }
+        // 更新引用计数
+        for (k, v) in self.kv_ref.iter() {
+            self.shared.ref_count.insert_or_update_local_ref_count(*k, *v);
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_replica(&self, mut meta: KvBlockMeta)-> anyhow::Result<()>{
+        let local_data_server = self.shared.config.local_data_server.clone();
+        //判断server_socket中是否包含本地节点的ip和port，并删除该server_socket
+        meta.server_socket.retain(|s| s.ip != local_data_server.ip || s.http_port != local_data_server.http_port);
+        if !meta.server_socket.is_empty(){
+            self.shared.insert_remote_kvcache(meta.clone());
+        }
+        self.shared.remove_local_kvcache(meta.block_id);
+        self.shared.insert_update_kvcache(meta.clone());
+        Ok(())
+    }
+}

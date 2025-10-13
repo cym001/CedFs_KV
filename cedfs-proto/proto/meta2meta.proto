@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package meta2meta;
+
+service Meta2Meta {
+    rpc MakeInitDir(MakeInitDirtRequest) returns (MakeInitDirResponse);
+    rpc GetNeighborIps(GetNeighborIpsRequest) returns (GetNeighborIpsResponse);
+}
+
+message MakeInitDirtRequest {
+    bytes node = 1;
+    string write_path = 2;
+    uint64 ino = 3;
+    bytes attr = 4;
+}
+
+message MakeInitDirResponse {
+    bytes node = 1;
+    string write_path = 2;
+    uint64 parent = 3;
+    bytes attr = 4;
+}
+
+message GetNeighborIpsRequest {
+    optional string server_type = 1;  // Optional filter by server type (Meta, Data)
+    optional string layer = 2;        // Optional filter by layer (Cloud, Edge, Device)
+}
+
+message NodeInfo {
+    string ip = 1;                    // Node IP address
+    uint32 port = 2;                  // Node port
+    string server_type = 3;           // Server type (Meta, Data)
+    string layer = 4;                 // Layer (Cloud, Edge, Device)
+}
+
+message GetNeighborIpsResponse {
+    repeated NodeInfo nodes = 1;      // List of nodes with type information
+}

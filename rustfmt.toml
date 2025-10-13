@@ -1,0 +1,10 @@
+binop_separator = "Back"
+condense_wildcard_suffixes = true
+fn_single_line = true
+format_strings = true
+hex_literal_case = "Upper"
+match_block_trailing_comma = true
+imports_granularity = "Module"
+reorder_impl_items = true
+group_imports = "StdExternalCrate"
+style_edition = "2021"

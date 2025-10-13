@@ -1,0 +1,247 @@
+syntax = "proto3";
+
+package client2meta;
+
+service Client2Meta {
+    rpc GetAttr(GetAttrRequest) returns (GetAttrResponse);
+    rpc GetDir(GetDirRequest) returns (GetDirResponse);
+    rpc Lookup(LookupRequest) returns (LookupResponse);
+    rpc Read(ReadRequest) returns (ReadResponse);
+    rpc SetAttr(SetAttrRequest) returns (SetAttrResponse);
+    rpc Write(WriteRequest) returns (WriteResponse);
+    rpc Create(CreateRequest) returns (CreateResponse);
+    rpc MoveFile(MoveFileRequest) returns (MoveFileResponse);
+    rpc Unlink(UnlinkRequest) returns (UnlinkResponse);
+    rpc CopyFile(CopyFileRequest) returns (CopyFileResponse);
+    rpc Link(LinkRequest) returns (LinkResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+//    rpc CreateNodeReplica(CreateNodeReplicaRequest) returns (CreateNodeReplicaResponse);
+//    rpc DeleteNodeReplica(DeleteNodeReplicaRequest) returns (DeleteNodeReplicaResponse);
+//    rpc MoveNodeReplica(MoveNodeReplicaRequest) returns (MoveNodeReplicaResponse);
+    rpc CopyReplica(CopyReplicaRequest) returns (CopyReplicaResponse);
+    rpc GetAllNodeIps(GetAllNodeIpsRequest) returns (GetAllNodeIpsResponse);
+    rpc GetUsage(GetUsageRequest) returns (GetUsageResponse);
+    /// FIXME: Delete it
+    rpc GetAttrByPath(GetAttrByPathRequest) returns (GetAttrByPathResponse);
+    /// FIXME: Delete it
+    rpc SetAttrByPath(SetAttrByPathRequest) returns (SetAttrByPathResponse);
+}
+
+message GetAttrRequest {
+    uint64 ino = 1;
+}
+
+message GetAttrResponse {
+    bytes attr = 1;
+}
+
+message GetDirRequest {
+    string path = 1;
+}
+
+message GetDirResponse {
+    uint64 ino = 1;
+    bytes attr = 2;
+    repeated DirEntry entries = 3;
+}
+
+message LookupRequest {
+    uint64 ino = 1;
+    string path = 2;
+}
+
+message LookupResponse {
+    uint64 ino = 1;
+    bytes attr = 2;
+}
+
+message ReadRequest {
+    string path = 1;
+    uint64 offset = 2;
+    uint64 buf_size = 3;
+}
+
+message ReadResponse {
+    uint64 ino = 1;
+    bytes attr = 2;
+    BlocksPos blocks_pos = 3;
+}
+
+message SetAttrRequest {
+    uint64 ino = 1;
+    bytes attr = 2;
+}
+
+message SetAttrResponse {
+    bytes attr = 1;
+}
+
+message WriteRequest {
+    string path = 1;
+    uint64 offset = 2;
+    uint64 buf_size = 3;
+    uint64 file_length = 4;
+    uint64 replica_num = 5;
+}
+
+message WriteResponse {
+    uint64 ino = 1;
+    bytes attr = 2;
+    BlocksPos blocks_pos = 3;
+}
+
+message DirEntry {
+    uint64 ino = 1;
+    bytes attr = 2;
+    string name = 3;
+    string domain = 4;
+}
+
+message BlockEntry {
+    string datanode_ip = 1;
+    int64 bid = 2;
+}
+
+message BlockPos {
+    string datanode_ip = 1;
+    int64 block_id = 2;
+}
+
+message BlocksPos {
+    repeated BlockPos blocks_pos = 1;
+    repeated ReplicaBlocks replica_blocks_pos = 2;
+}
+
+message ReplicaBlocks {
+    repeated BlockPos replica_blocks = 1;
+}
+
+message CreateRequest {
+    string path = 1;
+    string name = 2;
+    bool is_dir = 3;
+    uint32 mode = 4;
+}
+
+message CreateResponse {
+    uint64 ino = 1;
+    bytes attr = 2;
+}
+
+message MoveFileRequest {
+    string src = 1;
+    string dst = 2;
+}
+
+message MoveFileResponse {}
+
+message UnlinkRequest {
+    string path = 1;
+}
+
+message UnlinkResponse {
+    string filename = 1;
+    bytes attr = 2;
+    bytes blocks = 3;
+}
+
+message CopyFileRequest {
+    string src = 1;
+    string dst = 2;
+}
+
+message CopyFileResponse {}
+
+message LinkRequest {
+    string path = 1;
+    string name = 2;
+    bool is_dir = 3;
+    bytes attr = 4;
+    bytes blocks = 5;
+}
+
+message LinkResponse {}
+
+message DeleteRequest {
+    string path = 1;
+}
+
+message DeleteResponse {}
+
+//message CreateNodeReplicaRequest{
+//    uint64 ino = 1;
+//    string addr = 2;
+//}
+//
+//message CreateNodeReplicaResponse{}
+//
+//message DeleteNodeReplicaRequest{
+//    uint64 ino = 1;
+//    string addr = 2;
+//}
+//
+//message DeleteNodeReplicaResponse{}
+//
+//message MoveNodeReplicaRequest{
+//    uint64 ino = 1;
+//    string src_addr = 2;
+//    string dst_addr = 3;
+//}
+//
+//message MoveNodeReplicaResponse{}
+
+/// FIXME: Delete it
+message GetAttrByPathRequest {
+    string path = 1;
+}
+
+/// FIXME: Delete it
+message GetAttrByPathResponse {
+    bytes attr = 1;
+}
+
+/// FIXME: Delete it
+message SetAttrByPathRequest {
+    string path = 1;
+    bytes set_attr = 2;
+}
+
+/// FIXME: Delete it
+message SetAttrByPathResponse {
+    bytes attr = 1;
+}
+
+message CopyReplicaRequest{
+    uint64 first_block = 1;
+    uint64 last_block = 2;
+    BlocksPos blocks_pos = 3;
+}
+
+message CopyReplicaResponse{}
+
+message GetAllNodeIpsRequest {
+    optional string server_type = 1;  // Optional filter by server type (Meta, Data)
+    optional string layer = 2;        // Optional filter by layer (Cloud, Edge, Device)
+}
+
+message NodeInfo {
+    string ip = 1;                    // Node IP address
+    uint32 port = 2;                  // Node port
+    string server_type = 3;           // Server type (Meta, Data)
+    string layer = 4;                 // Layer (Cloud, Edge, Device)
+}
+
+message GetAllNodeIpsResponse {
+    repeated NodeInfo nodes = 1;      // List of nodes with type information
+}
+
+message GetUsageRequest {
+    // No parameters needed - gets usage for the current physical host
+}
+
+message GetUsageResponse {
+    uint64 total_space = 1;           // Total disk space in bytes
+    uint64 used_space = 2;            // Used disk space in bytes
+    uint64 available_space = 3;       // Available disk space in bytes
+    double usage_percentage = 4;      // Usage percentage (0.0 to 100.0)
+}

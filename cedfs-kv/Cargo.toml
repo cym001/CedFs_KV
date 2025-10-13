@@ -1,0 +1,30 @@
+[package]
+name = "cedfs-kv"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cedfs-kv"
+path = "src/bin/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bincode = { workspace = true }
+config = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+derive_builder = { workspace = true }
+dashmap = "6.1.0"
+serde = { workspace = true }
+scc = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+tonic = { workspace = true }
+thiserror = { workspace = true }
+trait-variant = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true}
+
+cedfs-proto = { version = "*", path = "../cedfs-proto" }
