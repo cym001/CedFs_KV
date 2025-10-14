@@ -52,9 +52,20 @@ impl KVServer {
     pub async fn new(config_path: PathBuf) -> anyhow::Result<Self>  {
         match Config::build_with_config(config_path) {
             Ok(config) => {
+                let meta_servers = Arc::new(RwLock::new(Vec::new()));
+                match config.load_remote_meta_from_config() {
+                    Ok(remote_servers) => {
+                        meta_servers.write().await.extend(remote_servers);
+                        tracing::info!("Loaded remote meta servers from config: {:?}", *meta_servers.read().await);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load remote meta servers from config: {}", e);
+                        return Err(anyhow::anyhow!("Failed to load remote meta servers from config: {}", e));
+                    }
+                }
                 let shared = Shared{
                     data_server_collect: Arc::new(RwLock::new(Vec::new())),
-                    meta_server_collect: Arc::new(RwLock::new(Vec::new())),
+                    meta_server_collect: meta_servers,
                     local_kvcache_table: Arc::new(DashMap::new()),
                     remote_kvcache_table: Arc::new(DashMap::new()),
                     update_kvmeta_table: Arc::new(DashMap::new()),

@@ -22,6 +22,9 @@ impl GetLocalKvMetaOp {
             self.shared.ref_count.insert_or_update_local_ref_count(*k, *v);
         }
 
+        tracing::info!("GetLocalKvMetaOp: Initialized {} local KV block metas and {} local block counts.",
+            self.kv_meta.len(), self.kv_ref.len());
+
         Ok(())
     }
 }

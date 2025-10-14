@@ -10,6 +10,8 @@ impl IncrLocalRefOp {
         for (k, v) in self.incr.iter() {
             self.shared.ref_count.increment_local_incremental_count(*k, *v);
         }
+        tracing::info!("IncrLocalRefOp: Incremented {} local block counts.",
+            self.incr.len());
         Ok(())
     }
 }

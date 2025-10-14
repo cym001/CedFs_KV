@@ -22,7 +22,7 @@ impl KvCacheClient {
             
             loop {
                 ticker.tick().await;
-                
+                tracing::info!("interval metadata sync start");
                 if let Err(e) = Self::sync_metadata(&shared).await {
                     tracing::error!("Metadata sync error: {:?}", e);
                 }
@@ -108,11 +108,14 @@ impl KvCacheClient {
                                     resp.data_server.into_iter().map(|d| d.into()).collect(),
                                 ).await;
                                 
+                                // 写入日志：与*元数据服务器同步成功
+                                tracing::info!("Successfully synced metadata with {}.", addr);
                                 Ok(())
                             }
                             // RPC调用失败，将该元数据服务器的layer标记为4
                             Err(e) => {
                                 Self::mark_meta_server_unavailable(&shared_clone, idx, 4).await;
+                                tracing::error!("Failed to sync metadata with {}: {:?}", addr, e);
                                 Err(anyhow::anyhow!("Failed to update meta on {}: {:?}", addr, e))
                             }
                         }

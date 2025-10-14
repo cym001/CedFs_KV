@@ -27,7 +27,8 @@ impl UploadKvMetaOp {
         for (k, v) in self.kv_ref.iter() {
             self.shared.ref_count.insert_or_update_local_ref_count(*k, *v);
         }
-
+        tracing::info!("UploadKvMetaOp: Uploaded {} local KV block metas and {} local block counts.",
+            self.kv_meta.len(), self.kv_ref.len());
         Ok(())
     }
 
@@ -40,6 +41,8 @@ impl UploadKvMetaOp {
         }
         self.shared.remove_local_kvcache(meta.block_id);
         self.shared.insert_update_kvcache(meta.clone());
+        tracing::info!("UploadKvMetaOp: Deleted replica of block_id {}, remaining replicas: {}.",
+            meta.block_id, meta.server_socket.len());
         Ok(())
     }
 }

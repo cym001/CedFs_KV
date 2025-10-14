@@ -81,6 +81,12 @@ impl Config {
             .build()
             .map_err(|e| ConfigError::LoadError(e.to_string()))
     }
+
+    pub fn load_remote_meta_from_config(&self) -> Result<Vec<MetaServer>, ConfigError> {
+        self.loaded_config
+            .get::<Vec<MetaServer>>("remote_meta_servers")
+            .map_err(|e| ConfigError::MissingField(format!("remote_meta_servers: {}", e)))
+    }
 }
 
 // 自定义错误类型

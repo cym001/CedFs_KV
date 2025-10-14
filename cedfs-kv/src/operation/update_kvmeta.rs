@@ -21,7 +21,8 @@ impl UpdateKvMetaOp {
         for (k, v) in self.kv_ref.iter() {
             self.shared.ref_count.increment_global_ref_count(*k,*v);
         }
-
+        tracing::info!("UpdateKvMetaOp: Updated {} remote KV block metas and {} global block counts.",
+            self.kv_meta.len(), self.kv_ref.len());
         Ok(())
     }
 }
