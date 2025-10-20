@@ -6,6 +6,7 @@ use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
 
 use crate::types::{DataServer, MetaServer};
 use crate::Shared;
+use crate::operation::popularity_score::PopularityScoreOp;
 
 pub struct KvCacheClient {
     pub shared: Shared,
@@ -52,7 +53,7 @@ impl KvCacheClient {
         
         let local_counts = {
             let counts_snapshot: Vec<LocalBlockCount> = shared.ref_count
-                .local_ref_counts
+                .local_incremental_count
                 .iter()
                 .map(|entry| LocalBlockCount {
                     block_id: *entry.key(),
@@ -85,8 +86,11 @@ impl KvCacheClient {
 
         // 只对layer为0,1,2的服务器进行元数据同步
         for (idx, meta_server) in meta_servers.iter().enumerate() {
-            // 跳过不可用的服务器(layer为3及以上)
+            // 跳过不可用的服务器(layer为3及以上)和本地节点
             if meta_server.layer >= 3 {
+                continue;
+            }
+            if meta_server.ip == shared.config.local_meta_server.ip && meta_server.port == shared.config.local_meta_server.port {
                 continue;
             }
             
@@ -167,14 +171,14 @@ impl KvCacheClient {
                 } else {
                     // 如果没有找到对应的服务器，说明是新加入的元数据服务器
                     // 先释放锁，然后进行异步操作
+                    meta_collect.push(updated_server.clone());
                     drop(meta_collect);
-                    
+
                     if let Err(e) = Self::get_kvmeta(shared, updated_server.clone()).await {
-                        tracing::error!("Failed to sync with new meta server {}: {:?}", updated_server.ip, e);
-                    } else {
-                        // 重新获取锁并添加服务器
+                        // 如果失败,从列表中移除
                         let mut meta_collect = shared.meta_server_collect.write().await;
-                        meta_collect.push(updated_server);
+                        meta_collect.retain(|s| !(s.ip == updated_server.ip && s.port == updated_server.port));
+                        tracing::error!("Failed to get initial KV meta from new meta server {}: {:?}", updated_server.ip, e);
                     }
                     
                     // 重新获取锁以便继续循环
@@ -248,5 +252,13 @@ impl KvCacheClient {
                 Err(anyhow::anyhow!("Failed to connect to {}: {:?}", addr, e))
             }
         }
+    }
+
+    /// kv cache 根据热度迁移
+    pub async fn get_popular_block_ids(&self) -> anyhow::Result<()> {
+        let data_servers = PopularityScoreOp {
+            shared: self.shared.clone(),
+        }.run().await;
+        Ok(())
     }
 }

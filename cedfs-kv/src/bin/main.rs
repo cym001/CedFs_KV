@@ -47,8 +47,16 @@ async fn main() -> anyhow::Result<()> {
     let config_path = args.path;
     let kvserver = KVServer::new(PathBuf::from(config_path)).await?;
     let shared = kvserver.shared.clone();
-    kvserver.serve().await;
-    KvCacheClient { shared }.launch().await?;
+    let client = KvCacheClient { shared };
+
+    let (_serve_res, launch_res) = tokio::join!(
+        kvserver.serve(),
+        client.launch(),
+    );
+
+    if let Err(e) = launch_res {
+        tracing::error!("Client launch failed: {:?}", e);
+    }
     
     Ok(())
 }

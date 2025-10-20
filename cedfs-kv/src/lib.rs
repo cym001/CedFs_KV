@@ -53,6 +53,8 @@ impl KVServer {
         match Config::build_with_config(config_path) {
             Ok(config) => {
                 let meta_servers = Arc::new(RwLock::new(Vec::new()));
+                meta_servers.write().await.push(config.local_meta_server.clone());
+                
                 match config.load_remote_meta_from_config() {
                     Ok(remote_servers) => {
                         meta_servers.write().await.extend(remote_servers);

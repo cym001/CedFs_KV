@@ -24,6 +24,9 @@ pub struct Config {
     // 副本拉取间隔，单位秒
     pub replica_pull_interval: u64,
 
+    // 一次拉取的副本数量
+    pub replica_pull_count: u64,
+
     // 日志级别
     pub log_level: String,
 
@@ -54,6 +57,9 @@ impl Config {
         
         let replica_pull_interval: u64 = config.get("replica_pull_interval")
             .map_err(|e| ConfigError::MissingField(format!("replica_pull_interval: {}", e)))?;
+
+        let replica_pull_count: u64 = config.get("replica_pull_count")
+            .map_err(|e| ConfigError::MissingField(format!("replica_pull_count: {}", e)))?;
         
         let log_level: String = config.get("log_level")
             .map_err(|e| ConfigError::MissingField(format!("log_level: {}", e)))?;
@@ -69,6 +75,7 @@ impl Config {
             .request_timeout(request_timeout)
             .replica_pull(replica_pull)
             .replica_pull_interval(replica_pull_interval)
+            .replica_pull_count(replica_pull_count)
             .log_level(log_level)
             .log_file(log_file)
             .build()
