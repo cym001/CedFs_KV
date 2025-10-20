@@ -129,6 +129,7 @@ impl Shared {
     /// - `false`: 插入新块
     pub fn insert_local_kvcache(&self, block_meta: KvBlockMeta) -> bool {
         let block_id = block_meta.block_id;
+        Self::insert_update_kvcache(&self, block_meta.clone());
         if let Some(mut existing) = self.local_kvcache_table.get_mut(&block_id) {
             // 块已存在,更新元数据
             *existing = block_meta;

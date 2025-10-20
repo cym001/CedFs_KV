@@ -4,9 +4,10 @@ use cedfs_proto::kvcache::kv_meta2_meta_client::KvMeta2MetaClient;
 use cedfs_proto::kvcache::{UpdateKvMetaRequest, UpdateKvMetaResponse, GetKvMetaRequest, GetKvMetaResponse};
 use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
 
-use crate::types::{DataServer, MetaServer};
+use crate::types::{DataServer, MetaServer, ServerSocket};
 use crate::Shared;
 use crate::operation::popularity_score::PopularityScoreOp;
+use crate::operation::move_kvreplica::MoveKVReplicaOp;
 
 pub struct KvCacheClient {
     pub shared: Shared,
@@ -255,10 +256,41 @@ impl KvCacheClient {
     }
 
     /// kv cache 根据热度迁移
-    pub async fn get_popular_block_ids(&self) -> anyhow::Result<()> {
+    pub async fn move_kv_replica(&self) -> anyhow::Result<()> {
         let data_servers = PopularityScoreOp {
             shared: self.shared.clone(),
         }.run().await;
+        let new_position = self.shared.config.local_data_server.clone().instance;
+        for (block_id,server, tokens) in data_servers {
+            if server.instance != new_position {
+                // 迁移逻辑
+                let url = format!("http://{}:{}", server.ip, server.http_port);
+                let client = MoveKVReplicaOp::new(&url);
+                match client.send_move_request(server.instance.clone(),new_position.clone(),tokens).await{
+                    Ok(response) => {
+                        match response.text().await {
+                            Ok(_) => {
+                                tracing::info!("Migrating data from server {:?} to local server {:?}", server, new_position);
+                                let mut meta = self.shared.get_local_kvcache(block_id).unwrap().clone();
+                                // 更新server_socket信息
+                                //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
+                                meta.server_socket.push(ServerSocket{
+                                    ip: self.shared.config.local_data_server.ip.clone(),
+                                    http_port: self.shared.config.local_data_server.http_port,
+                                    rpc_port: self.shared.config.local_data_server.rpc_port,
+                                });
+                                self.shared.insert_local_kvcache(meta.clone());
+                                self.shared.insert_remote_kvcache(meta);
+                            },
+                            Err(e) => tracing::error!("Failed to read response body: {}", e),
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to send move request: {}", e),
+                }
+                
+            }
+        }
+
         Ok(())
     }
 }

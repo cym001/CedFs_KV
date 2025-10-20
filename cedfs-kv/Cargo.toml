@@ -18,6 +18,7 @@ clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 derive_builder = { workspace = true }
 dashmap = "6.1.0"
+reqwest = { workspace = true }
 serde = { workspace = true }
 scc = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }

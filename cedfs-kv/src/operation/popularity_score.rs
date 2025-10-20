@@ -1,4 +1,4 @@
-use crate::types::{ServerSocket, DataServer};
+use crate::types::{DataServer};
 use crate::Shared;
 
 pub struct PopularityScoreOp {
@@ -6,10 +6,9 @@ pub struct PopularityScoreOp {
 }
 
 impl PopularityScoreOp {
-    pub async fn run(&self) -> Vec<DataServer> {
+    pub async fn run(&self) -> Vec<(u64, DataServer, Vec<i32>)> {
         let block_ids = Self::top_k_popularity(&self, self.shared.config.replica_pull_count as usize);
-        let data_servers = self.get_instance_from_block_id(block_ids).await;
-        data_servers
+        self.get_instance_from_block_id(block_ids).await
     }
 
     /// 获取远程引用计数中频率最大的k个block_id，且这些block_id不在本地引用计数中
@@ -54,8 +53,9 @@ impl PopularityScoreOp {
         result.into_iter().map(|(_, block_id)| block_id).collect()
     }
     
-    /// 根据block_id获取对应的DataServer，为每个block_id任取一个server_socket
-    pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<DataServer> {
+    /// 根据block_id获取对应的DataServer和tokens，为每个block_id任取一个server_socket
+    /// 返回: Vec<(block_id, DataServer, tokens)>
+    pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<(u64, DataServer, Vec<i32>)> {
         use std::collections::HashSet;
         
         let remote_kvcache_table = &self.shared.remote_kvcache_table;
@@ -67,6 +67,8 @@ impl PopularityScoreOp {
         for block_id in ids {
             // 从远程kv块元数据中获取block元数据
             if let Some(kv_meta) = remote_kvcache_table.get(&block_id) {
+                let tokens = kv_meta.tokens.clone();
+                
                 if let Some(server_socket) = kv_meta.server_socket.first() {
                     // 在data_server_collect中查找匹配的DataServer
                     for data_server in data_server_collect.iter() {
@@ -76,8 +78,11 @@ impl PopularityScoreOp {
                             // 使用HashSet去重，避免返回重复的DataServer
                             let server_key = (data_server.ip, data_server.http_port, data_server.rpc_port);
                             if !used_servers.contains(&server_key) {
-                                result.push(data_server.clone());
+                                result.push((block_id, data_server.clone(), tokens));
                                 used_servers.insert(server_key);
+                            } else {
+                                // 即使DataServer重复，也要返回这个block_id的信息
+                                result.push((block_id, data_server.clone(), tokens));
                             }
                             break;
                         }
