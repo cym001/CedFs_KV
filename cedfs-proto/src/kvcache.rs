@@ -2,20 +2,22 @@
 /// 数据服务器信息
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DataServer {
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
     /// IP地址（字符串形式）
-    #[prost(string, tag = "1")]
+    #[prost(string, tag = "2")]
     pub ip: ::prost::alloc::string::String,
     /// http端口
-    #[prost(uint32, tag = "2")]
+    #[prost(uint32, tag = "3")]
     pub http_port: u32,
     /// rpc端口
-    #[prost(uint32, tag = "3")]
+    #[prost(uint32, tag = "4")]
     pub rpc_port: u32,
     /// 网络层级
-    #[prost(uint32, tag = "4")]
+    #[prost(uint32, tag = "5")]
     pub layer: u32,
     /// 实例类型
-    #[prost(string, repeated, tag = "5")]
+    #[prost(string, repeated, tag = "6")]
     pub instance: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// 元数据服务器信息
@@ -30,19 +32,6 @@ pub struct MetaServer {
     /// 网络层级
     #[prost(uint32, tag = "3")]
     pub layer: u32,
-}
-/// 副本所在推理实例的socket
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ServerSocket {
-    /// IP地址（字符串形式）
-    #[prost(string, tag = "1")]
-    pub ip: ::prost::alloc::string::String,
-    /// http端口
-    #[prost(uint32, tag = "2")]
-    pub http_port: u32,
-    /// rpc端口
-    #[prost(uint32, tag = "3")]
-    pub rpc_port: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct KvBlockMeta {
@@ -62,8 +51,8 @@ pub struct KvBlockMeta {
     #[prost(uint64, tag = "5")]
     pub phy_size: u64,
     /// 副本所在服务器
-    #[prost(message, repeated, tag = "6")]
-    pub server_socket: ::prost::alloc::vec::Vec<ServerSocket>,
+    #[prost(uint32, repeated, tag = "6")]
+    pub server_id: ::prost::alloc::vec::Vec<u32>,
 }
 /// 本地单个 block 的引用计数
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]

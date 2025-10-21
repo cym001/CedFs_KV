@@ -35,14 +35,14 @@ impl UploadKvMetaOp {
     pub fn delete_replica(&self, mut meta: KvBlockMeta)-> anyhow::Result<()>{
         let local_data_server = self.shared.config.local_data_server.clone();
         //判断server_socket中是否包含本地节点的ip和port，并删除该server_socket
-        meta.server_socket.retain(|s| s.ip != local_data_server.ip || s.http_port != local_data_server.http_port);
-        if !meta.server_socket.is_empty(){
+        meta.server_id.retain(|s| *s != local_data_server.id );
+        if !meta.server_id.is_empty(){
             self.shared.insert_remote_kvcache(meta.clone());
         }
         self.shared.remove_local_kvcache(meta.block_id);
         self.shared.insert_update_kvcache(meta.clone());
         tracing::info!("UploadKvMetaOp: Deleted replica of block_id {}, remaining replicas: {}.",
-            meta.block_id, meta.server_socket.len());
+            meta.block_id, meta.server_id.len());
         Ok(())
     }
 }

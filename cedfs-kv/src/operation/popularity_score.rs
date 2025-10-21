@@ -56,34 +56,22 @@ impl PopularityScoreOp {
     /// 根据block_id获取对应的DataServer和tokens，为每个block_id任取一个server_socket
     /// 返回: Vec<(block_id, DataServer, tokens)>
     pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<(u64, DataServer, Vec<i32>)> {
-        use std::collections::HashSet;
         
         let remote_kvcache_table = &self.shared.remote_kvcache_table;
         let data_server_collect = self.shared.data_server_collect.read().await;
         
         let mut result = Vec::new();
-        let mut used_servers = HashSet::new();
         
         for block_id in ids {
             // 从远程kv块元数据中获取block元数据
             if let Some(kv_meta) = remote_kvcache_table.get(&block_id) {
                 let tokens = kv_meta.tokens.clone();
                 
-                if let Some(server_socket) = kv_meta.server_socket.first() {
+                if let Some(server_id) = kv_meta.server_id.first() {
                     // 在data_server_collect中查找匹配的DataServer
                     for data_server in data_server_collect.iter() {
-                        if data_server.ip == server_socket.ip 
-                            && data_server.http_port == server_socket.http_port 
-                            && data_server.rpc_port == server_socket.rpc_port {
-                            // 使用HashSet去重，避免返回重复的DataServer
-                            let server_key = (data_server.ip, data_server.http_port, data_server.rpc_port);
-                            if !used_servers.contains(&server_key) {
-                                result.push((block_id, data_server.clone(), tokens));
-                                used_servers.insert(server_key);
-                            } else {
-                                // 即使DataServer重复，也要返回这个block_id的信息
-                                result.push((block_id, data_server.clone(), tokens));
-                            }
+                        if data_server.id == *server_id {
+                            result.push((block_id, data_server.clone(), tokens));
                             break;
                         }
                     }

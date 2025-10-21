@@ -6,7 +6,6 @@ use tokio::time;
 use serde::{Serialize, Deserialize};
 
 use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
-use cedfs_proto::kvcache::ServerSocket as ProtoServerSocket;
 use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
 
 /// 元数据
@@ -28,7 +27,7 @@ pub struct KvBlockMeta {
     pub phy_size: usize,                
 
     // 副本信息
-    pub server_socket: Vec<ServerSocket>,      
+    pub server_id: Vec<u32>,      
 
 }
 
@@ -46,7 +45,10 @@ pub struct RefCount {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataServer {
-    /// 存储机器的ip
+    /// 推理实例的id
+    pub id: u32,
+
+    /// ip
     pub ip: IpAddr,
 
     /// http端口
@@ -76,16 +78,10 @@ pub struct MetaServer {
 
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServerSocket {
-    pub ip: IpAddr,
-    pub http_port: u16,
-    pub rpc_port: u16,
-}
-
 impl Default for DataServer {
     fn default() -> Self {
         Self {
+            id: 0,
             // 默认0.0.0.0
             ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
             // 默认端口0
@@ -111,18 +107,6 @@ impl Default for MetaServer {
     }
 }
 
-impl Default for ServerSocket {
-    fn default() -> Self {
-        Self {
-            // 默认0.0.0.0
-            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
-            // 默认端口0
-            http_port: 0,
-            rpc_port: 0, 
-        }
-    }
-}
-
 // Proto -> Internal 转换
 impl From<ProtoKvBlockMeta> for KvBlockMeta {
     fn from(proto: ProtoKvBlockMeta) -> Self {
@@ -132,7 +116,7 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
             model_hash: proto.model_hash,
             tokens: proto.tokens,
             phy_size: proto.phy_size as usize,
-            server_socket: proto.server_socket.into_iter().map(|s| s.into()).collect(),
+            server_id: proto.server_id,
         }
     }
 }
@@ -146,31 +130,11 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
             model_hash: internal.model_hash,
             tokens: internal.tokens,
             phy_size: internal.phy_size as u64,
-            server_socket: internal.server_socket.into_iter().map(|s| s.into()).collect(),
+            server_id: internal.server_id,
         }
     }
 }
 
-// ServerSocket 转换
-impl From<ProtoServerSocket> for ServerSocket {
-    fn from(proto: ProtoServerSocket) -> Self {
-        ServerSocket {
-            ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-            http_port: proto.http_port as u16,
-            rpc_port: proto.rpc_port as u16,
-        }
-    }
-}
-
-impl From<ServerSocket> for ProtoServerSocket {
-    fn from(internal: ServerSocket) -> Self {
-        ProtoServerSocket {
-            ip: internal.ip.to_string(),
-            http_port: internal.http_port as u32,
-            rpc_port: internal.rpc_port as u32,
-        }
-    }
-}
 
 // MetaServer 转换
 impl From<ProtoMetaServer> for MetaServer {
@@ -197,6 +161,7 @@ impl From<MetaServer> for ProtoMetaServer {
 impl From<cedfs_proto::kvcache::DataServer> for DataServer {
     fn from(proto: cedfs_proto::kvcache::DataServer) -> Self {
         DataServer {
+            id: proto.id,
             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             http_port: proto.http_port as u16,  
             rpc_port: proto.rpc_port as u16,
@@ -208,6 +173,7 @@ impl From<cedfs_proto::kvcache::DataServer> for DataServer {
 impl From<DataServer> for cedfs_proto::kvcache::DataServer {
     fn from(internal: DataServer) -> Self {
         cedfs_proto::kvcache::DataServer {
+            id: internal.id,
             ip: internal.ip.to_string(),
             http_port: internal.http_port as u32,
             rpc_port: internal.rpc_port as u32,
@@ -366,11 +332,17 @@ impl RefCount {
     /// - `block_id`: 块 ID
     /// - `increment`: 增量值
     pub fn increment_global_ref_count(&self, block_id: u64, increment: u64) -> u64 {
-        self.global_ref_counts
+        // 判断id是否在本地存在，存在则增加本地计数
+        if self.local_ref_counts.contains_key(&block_id) {
+            self.increment_local_ref_count(block_id, increment)
+        }else{
+            self.global_ref_counts
             .entry(block_id)
             .and_modify(|c| *c += increment)
             .or_insert(increment)
             .clone()
+        }
+        
     }
 
     /// 减少全局引用计数

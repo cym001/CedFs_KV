@@ -7,7 +7,7 @@ use tracing::info;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 
-use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, ServerSocket};
+use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer};
 use crate::config::Config;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::network::kv_meta2data::KvCacheDataService;
@@ -155,9 +155,9 @@ impl Shared {
         if let Some(mut existing) = self.remote_kvcache_table.get_mut(&block_id) {
             // 块已存在,更新元数据
             //保留server_socket的交集，若为空则删除该块
-            let existing_servers = &existing.server_socket;
-            let new_servers = &block_meta.server_socket;
-            let intersection: Vec<ServerSocket>  = existing_servers.iter()
+            let existing_servers = &existing.server_id;
+            let new_servers = &block_meta.server_id;
+            let intersection: Vec<u32>  = existing_servers.iter()
                 .filter(|s| new_servers.contains(s))
                 .cloned()
                 .collect();
@@ -167,7 +167,7 @@ impl Shared {
                 return false;
             }
             let mut block_meta = block_meta.clone();
-            block_meta.server_socket = intersection;
+            block_meta.server_id = intersection;
             *existing = block_meta;
             true
         } else {

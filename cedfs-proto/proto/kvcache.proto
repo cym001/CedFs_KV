@@ -9,11 +9,12 @@ service KvMeta2Meta {
 
 // 数据服务器信息
 message DataServer {
-    string ip = 1;                      // IP地址（字符串形式）
-    uint32 http_port = 2;               // http端口
-    uint32 rpc_port = 3;                // rpc端口
-    uint32 layer = 4;                   // 网络层级
-    repeated string instance = 5;       // 实例类型
+    uint32 id = 1;         
+    string ip = 2;                      // IP地址（字符串形式）
+    uint32 http_port = 3;               // http端口
+    uint32 rpc_port = 4;                // rpc端口
+    uint32 layer = 5;                   // 网络层级
+    repeated string instance = 6;       // 实例类型
 }
 
 // 元数据服务器信息
@@ -23,20 +24,13 @@ message MetaServer {
     uint32 layer = 3;               // 网络层级
 }
 
-// 副本所在推理实例的socket
-message ServerSocket {
-    string ip = 1;                      // IP地址（字符串形式）
-    uint32 http_port = 2;               // http端口
-    uint32 rpc_port = 3;                // rpc端口
-}
-
 message KvBlockMeta {
     uint64 block_id = 1;                // 块 ID  
     uint64 block_hash = 2;              // 块哈希值
     uint64 model_hash = 3;              // 模型哈希值
     repeated int32 tokens = 4;          // token ids
     uint64 phy_size = 5;                // 物理大小
-    repeated ServerSocket server_socket = 6;  // 副本所在服务器
+    repeated uint32 server_id = 6;                // 副本所在服务器
 }
 
 // 本地单个 block 的引用计数

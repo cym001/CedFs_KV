@@ -4,7 +4,7 @@ use cedfs_proto::kvcache::kv_meta2_meta_client::KvMeta2MetaClient;
 use cedfs_proto::kvcache::{UpdateKvMetaRequest, UpdateKvMetaResponse, GetKvMetaRequest, GetKvMetaResponse};
 use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
 
-use crate::types::{DataServer, MetaServer, ServerSocket};
+use crate::types::{DataServer, MetaServer};
 use crate::Shared;
 use crate::operation::popularity_score::PopularityScoreOp;
 use crate::operation::move_kvreplica::MoveKVReplicaOp;
@@ -274,11 +274,7 @@ impl KvCacheClient {
                                 let mut meta = self.shared.get_local_kvcache(block_id).unwrap().clone();
                                 // 更新server_socket信息
                                 //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
-                                meta.server_socket.push(ServerSocket{
-                                    ip: self.shared.config.local_data_server.ip.clone(),
-                                    http_port: self.shared.config.local_data_server.http_port,
-                                    rpc_port: self.shared.config.local_data_server.rpc_port,
-                                });
+                                meta.server_id.push(self.shared.config.local_data_server.id);
                                 self.shared.insert_local_kvcache(meta.clone());
                                 self.shared.insert_remote_kvcache(meta);
                             },
