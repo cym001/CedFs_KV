@@ -78,6 +78,17 @@ pub struct MetaServer {
 
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateKvOp{
+
+    pub block_id: u64,
+
+    pub operation: u32,
+
+    pub server_id: u32, 
+
+}
+
 impl Default for DataServer {
     fn default() -> Self {
         Self {
@@ -182,6 +193,30 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
         }
     }
 }
+
+
+//UpdateKvOp转换
+impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
+    fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
+        UpdateKvOp {
+            block_id: proto.block_id,
+            operation: proto.operation,
+            server_id: proto.server_id,
+        }
+    }
+}
+
+impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
+    fn from(internal: UpdateKvOp) -> Self {
+        cedfs_proto::kvcache::UpdateKvOp {
+            block_id: internal.block_id,
+            operation: internal.operation,
+            server_id: internal.server_id,
+        }
+    }
+    
+}
+
 
 impl RefCount {
     pub fn new() -> Self {

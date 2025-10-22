@@ -4,7 +4,7 @@ use cedfs_proto::kvcache::kv_meta2_meta_client::KvMeta2MetaClient;
 use cedfs_proto::kvcache::{UpdateKvMetaRequest, UpdateKvMetaResponse, GetKvMetaRequest, GetKvMetaResponse};
 use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
 
-use crate::types::{DataServer, MetaServer};
+use crate::types::{DataServer, MetaServer, UpdateKvOp};
 use crate::Shared;
 use crate::operation::popularity_score::PopularityScoreOp;
 use crate::operation::move_kvreplica::MoveKVReplicaOp;
@@ -51,6 +51,16 @@ impl KvCacheClient {
             shared.update_kvmeta_table.clear();
             meta_snapshot
         };
+
+        let update_kvop = {
+            let op_snapshot: Vec<cedfs_proto::kvcache::UpdateKvOp> = shared.update_kvop_table
+                .iter()
+                .map(|entry| entry.value().clone().into())
+                .collect();
+            
+            shared.update_kvop_table.clear();
+            op_snapshot
+        };
         
         let local_counts = {
             let counts_snapshot: Vec<LocalBlockCount> = shared.ref_count
@@ -74,6 +84,7 @@ impl KvCacheClient {
         let req = UpdateKvMetaRequest {
             meta: update_meta,
             local_counts,
+            update_op: update_kvop,
             update_time,
         };
         
@@ -275,8 +286,14 @@ impl KvCacheClient {
                                 // 更新server_socket信息
                                 //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
                                 meta.server_id.push(self.shared.config.local_data_server.id);
-                                self.shared.insert_local_kvcache(meta.clone());
-                                self.shared.insert_remote_kvcache(meta);
+                                self.shared.insert_local_kvcache(meta);
+                                let update_op = UpdateKvOp{
+                                    block_id,
+                                    operation: 1, //添加副本操作
+                                    server_id: self.shared.config.local_data_server.id,
+                                };
+                                self.shared.update_kvop_table.insert(block_id, update_op);
+
                             },
                             Err(e) => tracing::error!("Failed to read response body: {}", e),
                         }

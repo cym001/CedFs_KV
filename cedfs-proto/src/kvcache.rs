@@ -64,6 +64,19 @@ pub struct LocalBlockCount {
     #[prost(uint64, tag = "2")]
     pub count: u64,
 }
+/// 更新kvmeta的操作方式（创建、删除副本时）
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct UpdateKvOp {
+    /// 块 ID
+    #[prost(uint64, tag = "1")]
+    pub block_id: u64,
+    /// server_id的修改方式（1为增加，2为删除）
+    #[prost(uint32, tag = "2")]
+    pub operation: u32,
+    /// server_id
+    #[prost(uint32, tag = "3")]
+    pub server_id: u32,
+}
 /// 1. GetKvMeta - 获取副本列表
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetKvMetaRequest {
@@ -92,14 +105,17 @@ pub struct GetKvMetaResponse {
 /// 2. UpdateKvMeta - 更新kvcache元数据
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UpdateKvMetaRequest {
-    /// 本地更新过的kvcache元数据
+    /// 本地新的kvcache元数据
     #[prost(message, repeated, tag = "1")]
     pub meta: ::prost::alloc::vec::Vec<KvBlockMeta>,
     /// 本地所有 block 的增量计数
     #[prost(message, repeated, tag = "2")]
     pub local_counts: ::prost::alloc::vec::Vec<LocalBlockCount>,
+    /// 创建、删除KV Cache副本
+    #[prost(message, repeated, tag = "3")]
+    pub update_op: ::prost::alloc::vec::Vec<UpdateKvOp>,
     /// 本地快照的时间戳
-    #[prost(uint64, tag = "3")]
+    #[prost(uint64, tag = "4")]
     pub update_time: u64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]

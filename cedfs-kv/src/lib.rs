@@ -7,7 +7,7 @@ use tracing::info;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 
-use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer};
+use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp};
 use crate::config::Config;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::network::kv_meta2data::KvCacheDataService;
@@ -35,6 +35,9 @@ pub struct Shared{
 
     // 待更新的kvmeta
     pub update_kvmeta_table: Arc<DashMap<u64, KvBlockMeta>>,
+
+    // 待更新的kvmeta副本操作
+    pub update_kvop_table: Arc<DashMap<u64, UpdateKvOp>>,
 
     // 引用计数
     pub ref_count: Arc<RefCount>,
@@ -71,6 +74,7 @@ impl KVServer {
                     local_kvcache_table: Arc::new(DashMap::new()),
                     remote_kvcache_table: Arc::new(DashMap::new()),
                     update_kvmeta_table: Arc::new(DashMap::new()),
+                    update_kvop_table: Arc::new(DashMap::new()),
                     ref_count: Arc::new(RefCount::new()),
                     config: Arc::new(config),
                 };
@@ -228,6 +232,74 @@ impl Shared {
             self.update_kvmeta_table.insert(block_id, block_meta);
             false
         }
+    }
+
+    /// 插入或更新待更新kvmeta副本操作
+    /// 
+    /// # 参数
+    /// - `updatekv_op`: 要插入或更新的块元数据
+    /// 
+    /// # 返回
+    /// - `true`: 更新已存在的块
+    /// - `false`: 插入新块
+    
+    pub fn insert_update_kvop(&self, updatekv_op: UpdateKvOp) -> bool {
+        let block_id = updatekv_op.block_id;
+        if let Some(mut existing) = self.update_kvop_table.get_mut(&block_id) {
+            // 块已存在,更新元数据
+            *existing = updatekv_op;
+            true
+        } else {
+            // 块不存在,插入新块
+            self.update_kvop_table.insert(block_id, updatekv_op);
+            false
+        }
+    }
+
+    // 执行updatekv_op
+    pub fn execute_update_kvop(&self, updatekv_op: UpdateKvOp) -> anyhow::Result<()> {
+        match updatekv_op.operation {
+            1 => { // 添加副本操作
+                if let Some(mut kv_meta) = self.get_local_kvcache(updatekv_op.block_id) {
+                    if !kv_meta.server_id.contains(&updatekv_op.server_id) {
+                        kv_meta.server_id.push(updatekv_op.server_id);
+                        self.insert_local_kvcache(kv_meta);
+                    }
+                }
+                if let Some(mut kv_meta) = self.get_remote_kvcache(updatekv_op.block_id){
+                    if !kv_meta.server_id.contains(&updatekv_op.server_id) {
+                        kv_meta.server_id.push(updatekv_op.server_id);
+                        self.insert_remote_kvcache(kv_meta);
+                    }
+                }
+                tracing::info!("Executed add replica operation for block_id {} on server_id {}.",
+                    updatekv_op.block_id, updatekv_op.server_id);
+            },
+            2 => { // 删除副本操作
+                if let Some(mut kv_meta) = self.get_local_kvcache(updatekv_op.block_id) {
+                    kv_meta.server_id.retain(|&id| id != updatekv_op.server_id);
+                    if kv_meta.server_id.is_empty() {
+                        self.remove_local_kvcache(updatekv_op.block_id);
+                    } else {
+                        self.insert_local_kvcache(kv_meta);
+                    }
+                }
+                if let Some(mut kv_meta) = self.get_remote_kvcache(updatekv_op.block_id){
+                    kv_meta.server_id.retain(|&id| id != updatekv_op.server_id);
+                    if kv_meta.server_id.is_empty() {
+                        self.remove_remote_kvcache(updatekv_op.block_id);
+                    } else {
+                        self.insert_remote_kvcache(kv_meta);
+                    }
+                }
+                tracing::info!("Executed delete replica operation for block_id {} on server_id {}.",
+                    updatekv_op.block_id, updatekv_op.server_id);
+            },
+            _ => {
+                tracing::error!("Unknown operation type: {}", updatekv_op.operation);
+            }
+        }
+        Ok(())
     }
 }
 

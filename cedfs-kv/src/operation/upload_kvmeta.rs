@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Ok;
 
 use crate::Shared;
-use crate::types::{KvBlockMeta};
+use crate::types::{KvBlockMeta, UpdateKvOp};
 
 pub struct UploadKvMetaOp {
     pub kv_meta: Vec<KvBlockMeta>,
@@ -40,7 +40,13 @@ impl UploadKvMetaOp {
             self.shared.insert_remote_kvcache(meta.clone());
         }
         self.shared.remove_local_kvcache(meta.block_id);
-        self.shared.insert_update_kvcache(meta.clone());
+
+        let update_op = UpdateKvOp{
+            block_id: meta.block_id,
+            operation: 2, //删除副本操作
+            server_id: local_data_server.id,
+        };
+        self.shared.update_kvop_table.insert(meta.block_id, update_op);
         tracing::info!("UploadKvMetaOp: Deleted replica of block_id {}, remaining replicas: {}.",
             meta.block_id, meta.server_id.len());
         Ok(())
