@@ -1,12 +1,10 @@
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::time;
 use serde::{Serialize, Deserialize};
-
-use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
-use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
 
 /// 元数据
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -15,7 +13,7 @@ pub struct KvBlockMeta {
     pub block_id: u64,              
 
     // 块哈希值
-    pub block_hash: u64,            
+    pub token_hash: u64,            
 
     // 模型哈希值: 
     pub model_hash: u64,      
@@ -24,7 +22,7 @@ pub struct KvBlockMeta {
     pub tokens: Vec<i32>,                                
 
     // 物理大小
-    pub phy_size: usize,                
+    pub phy_size: u64,                
 
     // 副本信息
     pub server_id: Vec<u32>,      
@@ -89,6 +87,19 @@ pub struct UpdateKvOp{
 
 }
 
+/// KV块的唯一标识键
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KvBlockKey {
+    pub model_hash: u64,
+    pub token_hash: u64,
+}
+/// 全局块ID生成器
+pub struct BlockIdGenerator {
+    counter: AtomicU64,
+    node_id: u32,
+}
+
+
 impl Default for DataServer {
     fn default() -> Self {
         Self {
@@ -118,104 +129,6 @@ impl Default for MetaServer {
     }
 }
 
-// Proto -> Internal 转换
-impl From<ProtoKvBlockMeta> for KvBlockMeta {
-    fn from(proto: ProtoKvBlockMeta) -> Self {
-        KvBlockMeta {
-            block_id: proto.block_id,
-            block_hash: proto.block_hash,
-            model_hash: proto.model_hash,
-            tokens: proto.tokens,
-            phy_size: proto.phy_size as usize,
-            server_id: proto.server_id,
-        }
-    }
-}
-
-// Internal -> Proto 转换
-impl From<KvBlockMeta> for ProtoKvBlockMeta {
-    fn from(internal: KvBlockMeta) -> Self {
-        ProtoKvBlockMeta {
-            block_id: internal.block_id,
-            block_hash: internal.block_hash,
-            model_hash: internal.model_hash,
-            tokens: internal.tokens,
-            phy_size: internal.phy_size as u64,
-            server_id: internal.server_id,
-        }
-    }
-}
-
-
-// MetaServer 转换
-impl From<ProtoMetaServer> for MetaServer {
-    fn from(proto: ProtoMetaServer) -> Self {
-        MetaServer {
-            ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::    Ipv4Addr::LOCALHOST)),
-            port: proto.port as u16,
-            layer: proto.layer,
-        }
-    }
-}
-
-impl From<MetaServer> for ProtoMetaServer {
-    fn from(internal: MetaServer) -> Self {
-        ProtoMetaServer {
-            ip: internal.ip.to_string(),
-            port: internal.port as u32,
-            layer: internal.layer,
-        }
-    }
-}
-
-// DataServer 转换
-impl From<cedfs_proto::kvcache::DataServer> for DataServer {
-    fn from(proto: cedfs_proto::kvcache::DataServer) -> Self {
-        DataServer {
-            id: proto.id,
-            ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-            http_port: proto.http_port as u16,  
-            rpc_port: proto.rpc_port as u16,
-            layer: proto.layer,
-            instance: proto.instance,
-        }
-    }
-}   
-impl From<DataServer> for cedfs_proto::kvcache::DataServer {
-    fn from(internal: DataServer) -> Self {
-        cedfs_proto::kvcache::DataServer {
-            id: internal.id,
-            ip: internal.ip.to_string(),
-            http_port: internal.http_port as u32,
-            rpc_port: internal.rpc_port as u32,
-            layer: internal.layer,
-            instance: internal.instance,
-        }
-    }
-}
-
-
-//UpdateKvOp转换
-impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
-    fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
-        UpdateKvOp {
-            block_id: proto.block_id,
-            operation: proto.operation,
-            server_id: proto.server_id,
-        }
-    }
-}
-
-impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
-    fn from(internal: UpdateKvOp) -> Self {
-        cedfs_proto::kvcache::UpdateKvOp {
-            block_id: internal.block_id,
-            operation: internal.operation,
-            server_id: internal.server_id,
-        }
-    }
-    
-}
 
 
 impl RefCount {
@@ -452,5 +365,59 @@ impl RefCount {
         
         // 转换为 Vec 并返回
         counts.into_iter().collect()
+    }
+}
+
+
+impl KvBlockKey {
+    pub fn new(model_hash: u64, token_hash: u64) -> Self {
+        Self {
+            model_hash,
+            token_hash,
+        }
+    }
+}
+
+impl BlockIdGenerator {
+    pub fn new(node_id: u32) -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+            node_id,
+        }
+    }
+
+    /// 生成新的block_id（前32位node_id，后32位自增ID）
+    pub fn next_id(&self) -> u64 {
+        let local_id = self.counter.fetch_add(1, Ordering::SeqCst);
+        ((self.node_id as u64) << 32) | (local_id & 0xFFFFFFFF)
+    }
+
+    /// 从block_id提取node_id
+    pub fn extract_node_id(block_id: u64) -> u32 {
+        (block_id >> 32) as u32
+    }
+
+    /// 从block_id提取本地ID
+    pub fn extract_local_id(block_id: u64) -> u32 {
+        (block_id & 0xFFFFFFFF) as u32
+    }
+}
+
+impl KvBlockMeta {
+    /// 检查tokens是否完全匹配
+    pub fn tokens_match(&self, tokens: &[i32]) -> bool {
+        self.tokens == tokens
+    }
+
+    /// 添加副本服务器
+    pub fn add_replica(&mut self, server_id: u32) {
+        if !self.server_id.contains(&server_id) {
+            self.server_id.push(server_id);
+        }
+    }
+
+    /// 移除副本服务器
+    pub fn remove_replica(&mut self, server_id: u32) {
+        self.server_id.retain(|&id| id != server_id);
     }
 }

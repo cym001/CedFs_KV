@@ -38,7 +38,6 @@ impl KvMeta2Meta for KvCacheMetaService{
         }
     }
 
-
     /// 更新KV元数据
     async fn update_kv_meta(
         &self,
@@ -52,8 +51,10 @@ impl KvMeta2Meta for KvCacheMetaService{
             shared: self.shared.clone(),
         }.run();
         match resp {
-            Ok(_) => Ok(Response::new(UpdateKvMetaResponse {meta_server: (*self.shared.meta_server_collect).read().await.clone().into_iter().map(|m| m.into()).collect()
-                , data_server: (*self.shared.data_server_collect).read().await.clone().into_iter().map(|d| d.into()).collect()})),
+            Ok(_) => Ok(Response::new(UpdateKvMetaResponse {meta_server: (*self.shared.meta_server_collect)
+                .read().await.clone().into_iter().map(|m| m.into()).collect()
+                , data_server: (*self.shared.data_server_collect).read().await
+                .clone().into_iter().map(|d| d.into()).collect()})),
             Err(e) => Err(Status::internal(e.to_string())), 
         }    
     }

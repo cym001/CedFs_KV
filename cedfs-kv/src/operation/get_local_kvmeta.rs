@@ -1,11 +1,9 @@
-use std::collections::HashMap;
+use cedfs_proto::kvcache::UploadKvBlockMeta;
 
 use crate::Shared;
-use crate::types::{KvBlockMeta};
 
 pub struct GetLocalKvMetaOp {
-    pub kv_meta: Vec<KvBlockMeta>,
-    pub kv_ref: HashMap<u64,u64>,
+    pub kv_meta: Vec<UploadKvBlockMeta>,
     pub shared: Shared,
 }
 
@@ -14,16 +12,13 @@ impl GetLocalKvMetaOp {
         
         // 初始化本地kv元数据
         self.shared.clear_local_kvcache();
-        self.shared.batch_insert_local_kvcache(self.kv_meta.clone());
-
-        // 更新引用计数
-        self.shared.ref_count.clear_local_ref_counts();
-        for (k, v) in self.kv_ref.iter() {
-            self.shared.ref_count.insert_or_update_local_ref_count(*k, *v);
+        for block in self.kv_meta.iter() {
+            let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone(), block.phy_size);
+            self.shared.ref_count.increment_local_incremental_count(block_id, block.kv_ref);
         }
 
-        tracing::info!("GetLocalKvMetaOp: Initialized {} local KV block metas and {} local block counts.",
-            self.kv_meta.len(), self.kv_ref.len());
+        tracing::info!("GetLocalKvMetaOp: Initialized {} local KV block metas",
+            self.kv_meta.len());
 
         Ok(())
     }

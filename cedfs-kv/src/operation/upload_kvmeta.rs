@@ -1,13 +1,12 @@
-use std::collections::HashMap;
+use cedfs_proto::kvcache::UploadKvBlockMeta;
 
 use anyhow::Ok;
 
 use crate::Shared;
-use crate::types::{KvBlockMeta, UpdateKvOp};
+use crate::types::{UpdateKvOp};
 
 pub struct UploadKvMetaOp {
-    pub kv_meta: Vec<KvBlockMeta>,
-    pub kv_ref: HashMap<u64, u64>,
+    pub kv_meta: Vec<UploadKvBlockMeta>,
     pub shared: Shared,
 }
 
@@ -19,22 +18,32 @@ impl UploadKvMetaOp {
                 let _ = Self::delete_replica(self, block.clone());
             }
             else{
-                self.shared.insert_local_kvcache(block.clone());
+                let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone(), block.phy_size);
+                self.shared.ref_count.insert_or_update_local_ref_count(block_id, block.kv_ref);
             }
             
         }
-        // 更新引用计数
-        for (k, v) in self.kv_ref.iter() {
-            self.shared.ref_count.insert_or_update_local_ref_count(*k, *v);
-        }
-        tracing::info!("UploadKvMetaOp: Uploaded {} local KV block metas and {} local block counts.",
-            self.kv_meta.len(), self.kv_ref.len());
+        tracing::info!("UploadKvMetaOp: Uploaded {} local KV block metas.",self.kv_meta.len());
         Ok(())
     }
 
-    pub fn delete_replica(&self, mut meta: KvBlockMeta)-> anyhow::Result<()>{
+    pub fn delete_replica(&self, delete_meta: UploadKvBlockMeta)-> anyhow::Result<()>{
         let local_data_server = self.shared.config.local_data_server.clone();
         //判断server_socket中是否包含本地节点的ip和port，并删除该server_socket
+        let block_id = self.shared.find_kv_block(delete_meta.model_hash, delete_meta.token_hash, &delete_meta.tokens);
+        if block_id.is_none(){
+            tracing::warn!("UploadKvMetaOp: Tried to delete replica of non-existing block with model_hash {}, token_hash {}.",
+                delete_meta.model_hash, delete_meta.token_hash);
+            return Ok(());
+        }
+        let block_id = block_id.unwrap();
+        let meta = self.shared.get_local_kvcache(block_id);
+        if meta.is_none(){
+            tracing::warn!("UploadKvMetaOp: Tried to delete replica of non-existing local block_id {}.",
+                block_id);
+            return Ok(());
+        }
+        let mut meta = meta.unwrap();
         meta.server_id.retain(|s| *s != local_data_server.id );
         if !meta.server_id.is_empty(){
             self.shared.insert_remote_kvcache(meta.clone());

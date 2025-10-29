@@ -7,7 +7,7 @@ use tracing::info;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 
-use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp};
+use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp, KvBlockKey, BlockIdGenerator};
 use crate::config::Config;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::network::kv_meta2data::KvCacheDataService;
@@ -18,6 +18,7 @@ pub mod types;
 pub mod network;
 pub mod operation;
 pub mod client;
+pub mod convert;
 
 #[derive(Clone)]
 pub struct Shared{
@@ -27,11 +28,18 @@ pub struct Shared{
     // 元数据服务器信息
     pub meta_server_collect: Arc<RwLock<Vec<MetaServer>>>,
 
+    // Block ID 生成器
+    pub block_id_generator: Arc<BlockIdGenerator>,
+
     // 本地kv块元数据
     pub local_kvcache_table: Arc<DashMap<u64, KvBlockMeta>>,
 
+    // 全局KV块索引：(model_hash, token_hash) -> Vec<block_id>
+    // 使用 Vec 存储多个 block_id 来处理哈希冲突
+    pub global_kv_index: Arc<DashMap<KvBlockKey, Vec<u64>>>,
+
     // 远程kv块元数据
-    pub remote_kvcache_table: Arc<DashMap<u64, KvBlockMeta>>,
+    pub global_kvcache_table: Arc<DashMap<u64, KvBlockMeta>>,
 
     // 待更新的kvmeta
     pub update_kvmeta_table: Arc<DashMap<u64, KvBlockMeta>>,
@@ -71,8 +79,11 @@ impl KVServer {
                 let shared = Shared{
                     data_server_collect: Arc::new(RwLock::new(Vec::new())),
                     meta_server_collect: meta_servers,
+                    // todo() 修改初始block_id
+                    block_id_generator: Arc::new(BlockIdGenerator::new(1)),
+                    global_kv_index: Arc::new(DashMap::new()),
                     local_kvcache_table: Arc::new(DashMap::new()),
-                    remote_kvcache_table: Arc::new(DashMap::new()),
+                    global_kvcache_table: Arc::new(DashMap::new()),
                     update_kvmeta_table: Arc::new(DashMap::new()),
                     update_kvop_table: Arc::new(DashMap::new()),
                     ref_count: Arc::new(RefCount::new()),
@@ -156,7 +167,7 @@ impl Shared {
     pub fn insert_remote_kvcache(&self, block_meta: KvBlockMeta) -> bool {
         let block_id = block_meta.block_id;
         
-        if let Some(mut existing) = self.remote_kvcache_table.get_mut(&block_id) {
+        if let Some(mut existing) = self.global_kvcache_table.get_mut(&block_id) {
             // 块已存在,更新元数据
             //保留server_socket的交集，若为空则删除该块
             let existing_servers = &existing.server_id;
@@ -166,7 +177,7 @@ impl Shared {
                 .cloned()
                 .collect();
             if intersection.is_empty(){
-                self.remote_kvcache_table.remove(&block_id);
+                self.global_kvcache_table.remove(&block_id);
                 self.ref_count.remove_global_ref_count(block_id);
                 return false;
             }
@@ -176,7 +187,7 @@ impl Shared {
             true
         } else {
             // 块不存在,插入新块
-            self.remote_kvcache_table.insert(block_id, block_meta);
+            self.global_kvcache_table.insert(block_id, block_meta);
             false
         }
     }
@@ -303,7 +314,7 @@ impl Shared {
     }
 }
 
-// 辅助函数示例
+// 辅助函数
 impl Shared {
     /// 从本地表删除块
     pub fn remove_local_kvcache(&self, block_id: u64) -> Option<KvBlockMeta> {
@@ -312,7 +323,7 @@ impl Shared {
 
     /// 从远程表删除块
     pub fn remove_remote_kvcache(&self, block_id: u64) -> Option<KvBlockMeta> {
-        self.remote_kvcache_table.remove(&block_id).map(|(_, v)| v)
+        self.global_kvcache_table.remove(&block_id).map(|(_, v)| v)
     }
 
     /// 获取本地块元数据
@@ -322,11 +333,84 @@ impl Shared {
 
     /// 获取远程块元数据
     pub fn get_remote_kvcache(&self, block_id: u64) -> Option<KvBlockMeta> {
-        self.remote_kvcache_table.get(&block_id).map(|v| v.clone())
+        self.global_kvcache_table.get(&block_id).map(|v| v.clone())
     }
 
     /// 清除本地 KV 缓存块元数据
     pub fn clear_local_kvcache(&self) {
         self.local_kvcache_table.clear();
+    }
+
+    /// 查找或创建KV块
+    /// 返回: (block_id, is_new, is_primary)
+    pub fn find_or_create_kv_block(
+        &self,
+        model_hash: u64,
+        token_hash: u64,
+        tokens: Vec<i32>,
+        phy_size: u64,
+    ) -> u64 {
+        let key = KvBlockKey::new(model_hash, token_hash);
+
+        // 第一步：通过哈希快速查找所有候选块
+        if let Some(block_ids) = self.global_kv_index.get(&key) {
+            // 第二步：遍历所有候选块，验证tokens是否完全匹配
+            for &block_id in block_ids.value() {
+                if let Some(mut meta) = self.global_kvcache_table.get_mut(&block_id) {
+                    if meta.tokens_match(&tokens) {
+                        // todo()修改元数据
+                        meta.add_replica(self.config.local_data_server.id);
+                        return block_id;
+                    }
+                }
+            }
+            // 哈希相同但tokens不同，这是哈希冲突
+            // 继续创建新块，稍后会添加到同一个hash key的列表中
+        }
+
+        // 未找到匹配的块，创建新块
+        let block_id = self.block_id_generator.next_id();
+        let meta = KvBlockMeta {
+            block_id,
+            token_hash,
+            model_hash,
+            tokens,
+            phy_size,
+            server_id: vec![self.config.local_data_server.id],
+        };
+
+        // 插入元数据
+        self.insert_local_kvcache(meta);
+        
+        // 将新的 block_id 添加到索引的 Vec 中（处理哈希冲突）
+        self.global_kv_index
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .push(block_id);
+        
+
+        block_id
+    }
+
+    /// 查找已存在的KV块（不创建）
+    pub fn find_kv_block(
+        &self,
+        model_hash: u64,
+        token_hash: u64,
+        tokens: &[i32],
+    ) -> Option<u64> {
+        let key = KvBlockKey::new(model_hash, token_hash);
+        
+        // 遍历所有同哈希的块，查找tokens匹配的
+        self.global_kv_index.get(&key).and_then(|block_ids| {
+            for &block_id in block_ids.value() {
+                if let Some(meta) = self.global_kvcache_table.get(&block_id) {
+                    if meta.tokens_match(tokens) {
+                        return Some(block_id);
+                    }
+                }
+            }
+            None
+        })
     }
 }

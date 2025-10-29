@@ -57,7 +57,7 @@ impl PopularityScoreOp {
     /// 返回: Vec<(block_id, DataServer, tokens)>
     pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<(u64, DataServer, Vec<i32>)> {
         
-        let remote_kvcache_table = &self.shared.remote_kvcache_table;
+        let remote_kvcache_table = &self.shared.global_kvcache_table;
         let data_server_collect = self.shared.data_server_collect.read().await;
         
         let mut result = Vec::new();

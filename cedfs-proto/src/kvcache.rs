@@ -40,7 +40,7 @@ pub struct KvBlockMeta {
     pub block_id: u64,
     /// 块哈希值
     #[prost(uint64, tag = "2")]
-    pub block_hash: u64,
+    pub token_hash: u64,
     /// 模型哈希值
     #[prost(uint64, tag = "3")]
     pub model_hash: u64,
@@ -53,6 +53,24 @@ pub struct KvBlockMeta {
     /// 副本所在服务器
     #[prost(uint32, repeated, tag = "6")]
     pub server_id: ::prost::alloc::vec::Vec<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UploadKvBlockMeta {
+    /// 块哈希值
+    #[prost(uint64, tag = "1")]
+    pub token_hash: u64,
+    /// 模型哈希值
+    #[prost(uint64, tag = "2")]
+    pub model_hash: u64,
+    /// token ids
+    #[prost(int32, repeated, tag = "3")]
+    pub tokens: ::prost::alloc::vec::Vec<i32>,
+    /// 物理大小
+    #[prost(uint64, tag = "4")]
+    pub phy_size: u64,
+    /// 引用计数
+    #[prost(uint64, tag = "5")]
+    pub kv_ref: u64,
 }
 /// 本地单个 block 的引用计数
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -131,33 +149,18 @@ pub struct UpdateKvMetaResponse {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetLocalKvMetaRequest {
     #[prost(message, repeated, tag = "1")]
-    pub kvmeta: ::prost::alloc::vec::Vec<KvBlockMeta>,
-    #[prost(map = "uint64, uint64", tag = "2")]
-    pub kv_ref: ::std::collections::HashMap<u64, u64>,
+    pub kvmeta: ::prost::alloc::vec::Vec<UploadKvBlockMeta>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct GetLocalKvMetaResponse {
-    #[prost(bool, tag = "3")]
-    pub success: bool,
-}
-/// 2.数据服务器向元数据服务器同步本地kvcache引用计数递增
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct IncrRefCountSyncRequest {
-    #[prost(map = "uint64, uint64", tag = "1")]
-    pub kv_incr: ::std::collections::HashMap<u64, u64>,
-}
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct IncrRefCountSyncResponse {
     #[prost(bool, tag = "1")]
     pub success: bool,
 }
-/// 3.数据服务器向元数据服务器上传本地新增kvcache元数据
+/// 2.数据服务器向元数据服务器上传本地新增kvcache元数据
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UploadKvMetaRequest {
     #[prost(message, repeated, tag = "1")]
-    pub kvmeta: ::prost::alloc::vec::Vec<KvBlockMeta>,
-    #[prost(map = "uint64, uint64", tag = "2")]
-    pub kv_ref: ::std::collections::HashMap<u64, u64>,
+    pub kvmeta: ::prost::alloc::vec::Vec<UploadKvBlockMeta>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct UploadKvMetaResponse {
@@ -418,30 +421,6 @@ pub mod kv_meta2_data_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("kvcache.KvMeta2Data", "GetLocalKvMeta"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn incr_ref_count(
-            &mut self,
-            request: impl tonic::IntoRequest<super::IncrRefCountSyncRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::IncrRefCountSyncResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/kvcache.KvMeta2Data/IncrRefCount",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("kvcache.KvMeta2Data", "IncrRefCount"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn upload_kv_meta(
@@ -724,13 +703,6 @@ pub mod kv_meta2_data_server {
             tonic::Response<super::GetLocalKvMetaResponse>,
             tonic::Status,
         >;
-        async fn incr_ref_count(
-            &self,
-            request: tonic::Request<super::IncrRefCountSyncRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::IncrRefCountSyncResponse>,
-            tonic::Status,
-        >;
         async fn upload_kv_meta(
             &self,
             request: tonic::Request<super::UploadKvMetaRequest>,
@@ -845,51 +817,6 @@ pub mod kv_meta2_data_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetLocalKvMetaSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/kvcache.KvMeta2Data/IncrRefCount" => {
-                    #[allow(non_camel_case_types)]
-                    struct IncrRefCountSvc<T: KvMeta2Data>(pub Arc<T>);
-                    impl<
-                        T: KvMeta2Data,
-                    > tonic::server::UnaryService<super::IncrRefCountSyncRequest>
-                    for IncrRefCountSvc<T> {
-                        type Response = super::IncrRefCountSyncResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::IncrRefCountSyncRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KvMeta2Data>::incr_ref_count(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = IncrRefCountSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
