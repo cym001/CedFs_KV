@@ -76,11 +76,15 @@ impl KVServer {
                         return Err(anyhow::anyhow!("Failed to load remote meta servers from config: {}", e));
                     }
                 }
+                let data_servers = Arc::new(RwLock::new(Vec::new()));
+                data_servers.write().await.push(config.local_data_server.clone());
+
+                let meta_hash_id = config.local_meta_server.hash_id();
+
                 let shared = Shared{
-                    data_server_collect: Arc::new(RwLock::new(Vec::new())),
+                    data_server_collect: data_servers,
                     meta_server_collect: meta_servers,
-                    // todo() 修改初始block_id
-                    block_id_generator: Arc::new(BlockIdGenerator::new(1)),
+                    block_id_generator: Arc::new(BlockIdGenerator::new(meta_hash_id)),
                     global_kv_index: Arc::new(DashMap::new()),
                     local_kvcache_table: Arc::new(DashMap::new()),
                     global_kvcache_table: Arc::new(DashMap::new()),
@@ -356,10 +360,21 @@ impl Shared {
         if let Some(block_ids) = self.global_kv_index.get(&key) {
             // 第二步：遍历所有候选块，验证tokens是否完全匹配
             for &block_id in block_ids.value() {
+                if let Some(meta) = self.local_kvcache_table.get_mut(&block_id){
+                    if meta.tokens_match(&tokens){
+                        return block_id;
+                    }
+                }
                 if let Some(mut meta) = self.global_kvcache_table.get_mut(&block_id) {
                     if meta.tokens_match(&tokens) {
-                        // todo()修改元数据
                         meta.add_replica(self.config.local_data_server.id);
+                        self.local_kvcache_table.insert(block_id, meta.clone());
+                        let update_op = UpdateKvOp{
+                            block_id: meta.block_id,
+                            operation: 1, 
+                            server_id: self.config.local_data_server.id,
+                        };
+                        self.update_kvop_table.insert(meta.block_id, update_op);
                         return block_id;
                     }
                 }

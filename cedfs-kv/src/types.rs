@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use tokio::time;
 use serde::{Serialize, Deserialize};
 
@@ -129,7 +131,16 @@ impl Default for MetaServer {
     }
 }
 
-
+impl MetaServer {
+    /// 生成一个稳定的 u32 哈希 ID
+    pub fn hash_id(&self) -> u32 {
+        let mut hasher = DefaultHasher::new();
+        self.ip.hash(&mut hasher);
+        self.port.hash(&mut hasher);
+        self.layer.hash(&mut hasher);
+        (hasher.finish() & 0xFFFF_FFFF) as u32
+    }
+}
 
 impl RefCount {
     pub fn new() -> Self {

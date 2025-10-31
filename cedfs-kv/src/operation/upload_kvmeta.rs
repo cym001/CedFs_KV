@@ -19,7 +19,7 @@ impl UploadKvMetaOp {
             }
             else{
                 let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone(), block.phy_size);
-                self.shared.ref_count.insert_or_update_local_ref_count(block_id, block.kv_ref);
+                self.shared.ref_count.increment_local_incremental_count(block_id, block.kv_ref);
             }
             
         }

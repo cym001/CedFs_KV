@@ -1,4 +1,3 @@
-pub mod delete_kvblock;
 pub mod get_local_kvmeta;
 pub mod move_kvreplica;
 pub mod popularity_score;
