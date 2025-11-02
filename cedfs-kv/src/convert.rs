@@ -11,9 +11,7 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
         KvBlockMeta {
             block_id: proto.block_id,
             token_hash: proto.token_hash,
-            model_hash: proto.model_hash,
             tokens: proto.tokens,
-            phy_size: proto.phy_size,
             server_id: proto.server_id,
         }
     }
@@ -25,9 +23,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
         ProtoKvBlockMeta {
             block_id: internal.block_id,
             token_hash: internal.token_hash,
-            model_hash: internal.model_hash,
             tokens: internal.tokens,
-            phy_size: internal.phy_size,
             server_id: internal.server_id,
         }
     }
