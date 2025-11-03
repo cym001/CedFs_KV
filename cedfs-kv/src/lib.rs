@@ -349,10 +349,9 @@ impl Shared {
     /// 返回: (block_id, is_new, is_primary)
     pub fn find_or_create_kv_block(
         &self,
-        model_hash: u64,
-        token_hash: u64,
+        model_hash: i32,
+        token_hash: i32,
         tokens: Vec<i32>,
-        phy_size: u64,
     ) -> u64 {
         let key = KvBlockKey::new(model_hash, token_hash);
 
@@ -390,7 +389,6 @@ impl Shared {
             token_hash,
             model_hash,
             tokens,
-            phy_size,
             server_id: vec![self.config.local_data_server.id],
         };
 
@@ -410,8 +408,8 @@ impl Shared {
     /// 查找已存在的KV块（不创建）
     pub fn find_kv_block(
         &self,
-        model_hash: u64,
-        token_hash: u64,
+        model_hash: i32,
+        token_hash: i32,
         tokens: &[i32],
     ) -> Option<u64> {
         let key = KvBlockKey::new(model_hash, token_hash);

@@ -15,16 +15,13 @@ pub struct KvBlockMeta {
     pub block_id: u64,              
 
     // 块哈希值
-    pub token_hash: u64,            
+    pub token_hash: i32,            
 
     // 模型哈希值: 
-    pub model_hash: u64,      
+    pub model_hash: i32,      
 
     // token ids
-    pub tokens: Vec<i32>,                                
-
-    // 物理大小
-    pub phy_size: u64,                
+    pub tokens: Vec<i32>,                                              
 
     // 副本信息
     pub server_id: Vec<u32>,      
@@ -92,8 +89,8 @@ pub struct UpdateKvOp{
 /// KV块的唯一标识键
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KvBlockKey {
-    pub model_hash: u64,
-    pub token_hash: u64,
+    pub model_hash: i32,
+    pub token_hash: i32,
 }
 /// 全局块ID生成器
 pub struct BlockIdGenerator {
@@ -381,7 +378,7 @@ impl RefCount {
 
 
 impl KvBlockKey {
-    pub fn new(model_hash: u64, token_hash: u64) -> Self {
+    pub fn new(model_hash: i32, token_hash: i32) -> Self {
         Self {
             model_hash,
             token_hash,

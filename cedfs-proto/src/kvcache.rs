@@ -39,38 +39,32 @@ pub struct KvBlockMeta {
     #[prost(uint64, tag = "1")]
     pub block_id: u64,
     /// 块哈希值
-    #[prost(uint64, tag = "2")]
-    pub token_hash: u64,
+    #[prost(int32, tag = "2")]
+    pub token_hash: i32,
     /// 模型哈希值
-    #[prost(uint64, tag = "3")]
-    pub model_hash: u64,
+    #[prost(int32, tag = "3")]
+    pub model_hash: i32,
     /// token ids
     #[prost(int32, repeated, tag = "4")]
     pub tokens: ::prost::alloc::vec::Vec<i32>,
-    /// 物理大小
-    #[prost(uint64, tag = "5")]
-    pub phy_size: u64,
     /// 副本所在服务器
-    #[prost(uint32, repeated, tag = "6")]
+    #[prost(uint32, repeated, tag = "5")]
     pub server_id: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UploadKvBlockMeta {
     /// 块哈希值
-    #[prost(uint64, tag = "1")]
-    pub token_hash: u64,
+    #[prost(int32, tag = "1")]
+    pub token_hash: i32,
     /// 模型哈希值
-    #[prost(uint64, tag = "2")]
-    pub model_hash: u64,
+    #[prost(int32, tag = "2")]
+    pub model_hash: i32,
     /// token ids
     #[prost(int32, repeated, tag = "3")]
     pub tokens: ::prost::alloc::vec::Vec<i32>,
-    /// 物理大小
-    #[prost(uint64, tag = "4")]
-    pub phy_size: u64,
     /// 引用计数
-    #[prost(uint64, tag = "5")]
-    pub kv_ref: u64,
+    #[prost(uint32, tag = "4")]
+    pub kv_ref: u32,
 }
 /// 本地单个 block 的引用计数
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
