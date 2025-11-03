@@ -7,7 +7,7 @@ use tracing::info;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 
-use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp, BlockIdGenerator};
+use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp, KvBlockKey, BlockIdGenerator};
 use crate::config::Config;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::network::kv_meta2data::KvCacheDataService;
@@ -36,7 +36,7 @@ pub struct Shared{
 
     // 全局KV块索引：(model_hash, token_hash) -> Vec<block_id>
     // 使用 Vec 存储多个 block_id 来处理哈希冲突
-    pub global_kv_index: Arc<DashMap<u64, Vec<u64>>>,
+    pub global_kv_index: Arc<DashMap<KvBlockKey, Vec<u64>>>,
 
     // 远程kv块元数据
     pub global_kvcache_table: Arc<DashMap<u64, KvBlockMeta>>,
@@ -349,12 +349,15 @@ impl Shared {
     /// 返回: (block_id, is_new, is_primary)
     pub fn find_or_create_kv_block(
         &self,
+        model_hash: u64,
         token_hash: u64,
         tokens: Vec<i32>,
+        phy_size: u64,
     ) -> u64 {
+        let key = KvBlockKey::new(model_hash, token_hash);
 
         // 第一步：通过哈希快速查找所有候选块
-        if let Some(block_ids) = self.global_kv_index.get(&token_hash) {
+        if let Some(block_ids) = self.global_kv_index.get(&key) {
             // 第二步：遍历所有候选块，验证tokens是否完全匹配
             for &block_id in block_ids.value() {
                 if let Some(meta) = self.local_kvcache_table.get_mut(&block_id){
@@ -385,7 +388,9 @@ impl Shared {
         let meta = KvBlockMeta {
             block_id,
             token_hash,
+            model_hash,
             tokens,
+            phy_size,
             server_id: vec![self.config.local_data_server.id],
         };
 
@@ -394,7 +399,7 @@ impl Shared {
         
         // 将新的 block_id 添加到索引的 Vec 中（处理哈希冲突）
         self.global_kv_index
-            .entry(token_hash)
+            .entry(key)
             .or_insert_with(Vec::new)
             .push(block_id);
         
@@ -405,12 +410,14 @@ impl Shared {
     /// 查找已存在的KV块（不创建）
     pub fn find_kv_block(
         &self,
+        model_hash: u64,
         token_hash: u64,
         tokens: &[i32],
     ) -> Option<u64> {
+        let key = KvBlockKey::new(model_hash, token_hash);
         
         // 遍历所有同哈希的块，查找tokens匹配的
-        self.global_kv_index.get(&token_hash).and_then(|block_ids| {
+        self.global_kv_index.get(&key).and_then(|block_ids| {
             for &block_id in block_ids.value() {
                 if let Some(meta) = self.global_kvcache_table.get(&block_id) {
                     if meta.tokens_match(tokens) {

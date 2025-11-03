@@ -13,7 +13,7 @@ impl GetLocalKvMetaOp {
         // 初始化本地kv元数据
         self.shared.clear_local_kvcache();
         for block in self.kv_meta.iter() {
-            let block_id = self.shared.find_or_create_kv_block(block.token_hash, block.tokens.clone());
+            let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone(), block.phy_size);
             self.shared.ref_count.increment_local_incremental_count(block_id, block.kv_ref);
         }
 

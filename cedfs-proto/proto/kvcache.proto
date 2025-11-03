@@ -26,15 +26,19 @@ message MetaServer {
 
 message KvBlockMeta {
     uint64 block_id = 1;                // 块 ID  
-    uint64 token_hash = 2;              // 块哈希值(model和token的共同hash值)
-    repeated int32 tokens = 3;          // token ids
-    repeated uint32 server_id = 4;      // 副本所在服务器
+    uint64 token_hash = 2;              // 块哈希值
+    uint64 model_hash = 3;              // 模型哈希值
+    repeated int32 tokens = 4;          // token ids
+    uint64 phy_size = 5;                // 物理大小
+    repeated uint32 server_id = 6;      // 副本所在服务器
 }
 
 message UploadKvBlockMeta {
     uint64 token_hash = 1;              // 块哈希值
-    repeated int32 tokens = 2;          // token ids
-    uint64 kv_ref = 3;                  // 引用计数
+    uint64 model_hash = 2;              // 模型哈希值
+    repeated int32 tokens = 3;          // token ids
+    uint64 phy_size = 4;                // 物理大小
+    uint64 kv_ref = 5;                  // 引用计数
 }
 
 // 本地单个 block 的引用计数
