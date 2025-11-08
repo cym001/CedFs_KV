@@ -24,7 +24,7 @@ impl KvCacheClient {
             
             loop {
                 ticker.tick().await;
-                tracing::info!("interval metadata sync start");
+                //tracing::info!("interval metadata sync start");
                 if let Err(e) = Self::sync_metadata(&shared).await {
                     tracing::error!("Metadata sync error: {:?}", e);
                 }
@@ -231,9 +231,10 @@ impl KvCacheClient {
     /// 向新加入的元数据服务器发起全量同步请求
     pub async fn get_kvmeta(shared: &Shared, meta_server: MetaServer) -> anyhow::Result<()> {
         let addr = format!("http://{}:{}", meta_server.ip, meta_server.port);
+        let data_servers: Vec<cedfs_proto::kvcache::DataServer> = shared.data_server_collect.read().await.clone().into_iter().map(|d|d.into()).collect();
         let req = GetKvMetaRequest {
             meta_server: Some(shared.config.local_meta_server.clone().into()),
-            data_server: Some(shared.config.local_data_server.clone().into()),
+            data_server: data_servers,
         };
         
         match KvMeta2MetaClient::connect(addr.clone()).await {
@@ -268,41 +269,41 @@ impl KvCacheClient {
 
     /// kv cache 根据热度迁移
     pub async fn move_kv_replica(&self) -> anyhow::Result<()> {
-        let data_servers = PopularityScoreOp {
-            shared: self.shared.clone(),
-        }.run().await;
-        let new_position = self.shared.config.local_data_server.clone().instance;
-        for (block_id,server, tokens) in data_servers {
-            if server.instance != new_position {
-                // 迁移逻辑
-                let url = format!("http://{}:{}", server.ip, server.http_port);
-                let client = MoveKVReplicaOp::new(&url);
-                match client.send_move_request(server.instance.clone(),new_position.clone(),tokens).await{
-                    Ok(response) => {
-                        match response.text().await {
-                            Ok(_) => {
-                                tracing::info!("Migrating data from server {:?} to local server {:?}", server, new_position);
-                                let mut meta = self.shared.get_local_kvcache(block_id).unwrap().clone();
-                                // 更新server_socket信息
-                                //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
-                                meta.server_id.push(self.shared.config.local_data_server.id);
-                                self.shared.insert_local_kvcache(meta);
-                                let update_op = UpdateKvOp{
-                                    block_id,
-                                    operation: 1, //添加副本操作
-                                    server_id: self.shared.config.local_data_server.id,
-                                };
-                                self.shared.update_kvop_table.insert(block_id, update_op);
+        // let data_servers = PopularityScoreOp {
+        //     shared: self.shared.clone(),
+        // }.run().await;
+        // let new_position = self.shared.config.local_data_server.clone().instance;
+        // for (block_id,server, tokens) in data_servers {
+        //     if server.instance != new_position {
+        //         // 迁移逻辑
+        //         let url = format!("http://{}:{}", server.ip, server.http_port);
+        //         let client = MoveKVReplicaOp::new(&url);
+        //         match client.send_move_request(server.instance.clone(),new_position.clone(),tokens).await{
+        //             Ok(response) => {
+        //                 match response.text().await {
+        //                     Ok(_) => {
+        //                         tracing::info!("Migrating data from server {:?} to local server {:?}", server, new_position);
+        //                         let mut meta = self.shared.get_local_kvcache(block_id).unwrap().clone();
+        //                         // 更新server_socket信息
+        //                         //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
+        //                         meta.server_id.push(self.shared.config.local_data_server.id);
+        //                         self.shared.insert_local_kvcache(meta);
+        //                         let update_op = UpdateKvOp{
+        //                             block_id,
+        //                             operation: 1, //添加副本操作
+        //                             server_id: self.shared.config.local_data_server.id,
+        //                         };
+        //                         self.shared.update_kvop_table.insert(block_id, update_op);
 
-                            },
-                            Err(e) => tracing::error!("Failed to read response body: {}", e),
-                        }
-                    }
-                    Err(e) => tracing::error!("Failed to send move request: {}", e),
-                }
+        //                     },
+        //                     Err(e) => tracing::error!("Failed to read response body: {}", e),
+        //                 }
+        //             }
+        //             Err(e) => tracing::error!("Failed to send move request: {}", e),
+        //         }
                 
-            }
-        }
+        //     }
+        // }
 
         Ok(())
     }

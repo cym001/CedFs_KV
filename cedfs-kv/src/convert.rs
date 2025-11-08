@@ -61,8 +61,7 @@ impl From<cedfs_proto::kvcache::DataServer> for DataServer {
             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             http_port: proto.http_port as u16,  
             rpc_port: proto.rpc_port as u16,
-            layer: proto.layer,
-            instance: proto.instance,
+            model_name: proto.model_name,
         }
     }
 }   
@@ -73,8 +72,7 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
             ip: internal.ip.to_string(),
             http_port: internal.http_port as u32,
             rpc_port: internal.rpc_port as u32,
-            layer: internal.layer,
-            instance: internal.instance,
+            model_name: internal.model_name,
         }
     }
 }

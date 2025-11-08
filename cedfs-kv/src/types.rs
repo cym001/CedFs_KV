@@ -15,13 +15,13 @@ pub struct KvBlockMeta {
     pub block_id: u64,              
 
     // 块哈希值
-    pub token_hash: i32,            
+    pub token_hash: i64,            
 
     // 模型哈希值: 
-    pub model_hash: i32,      
+    pub model_hash: i64,      
 
     // token ids
-    pub tokens: Vec<i32>,                                              
+    pub tokens: Vec<i64>,                                              
 
     // 副本信息
     pub server_id: Vec<u32>,      
@@ -54,11 +54,8 @@ pub struct DataServer {
     /// rpc端口
     pub rpc_port: u16,
 
-    /// 存储机器的网络层级（云、边）  0为云侧， 1为边侧
-    pub layer: u32,
-
-    ///实例类型
-    pub instance: Vec<String>,
+    /// 实例部署的模型名称
+    pub model_name: String,
 
 }
 
@@ -89,8 +86,8 @@ pub struct UpdateKvOp{
 /// KV块的唯一标识键
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KvBlockKey {
-    pub model_hash: i32,
-    pub token_hash: i32,
+    pub model_hash: i64,
+    pub token_hash: i64,
 }
 /// 全局块ID生成器
 pub struct BlockIdGenerator {
@@ -107,10 +104,8 @@ impl Default for DataServer {
             ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
             // 默认端口0
             http_port: 0,
-            rpc_port: 0,
-            // 默认云侧         
-            layer: 0,       
-            instance: Vec::new(),
+            rpc_port: 0,    
+            model_name: "default_model_name".to_string(),
         }
     }
 }
@@ -378,7 +373,7 @@ impl RefCount {
 
 
 impl KvBlockKey {
-    pub fn new(model_hash: i32, token_hash: i32) -> Self {
+    pub fn new(model_hash: i64, token_hash: i64) -> Self {
         Self {
             model_hash,
             token_hash,
@@ -413,7 +408,7 @@ impl BlockIdGenerator {
 
 impl KvBlockMeta {
     /// 检查tokens是否完全匹配
-    pub fn tokens_match(&self, tokens: &[i32]) -> bool {
+    pub fn tokens_match(&self, tokens: &[i64]) -> bool {
         self.tokens == tokens
     }
 

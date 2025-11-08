@@ -6,7 +6,7 @@ pub struct PopularityScoreOp {
 }
 
 impl PopularityScoreOp {
-    pub async fn run(&self) -> Vec<(u64, DataServer, Vec<i32>)> {
+    pub async fn run(&self) -> Vec<(u64, DataServer, Vec<i64>)> {
         let block_ids = Self::top_k_popularity(&self, self.shared.config.replica_pull_count as usize);
         self.get_instance_from_block_id(block_ids).await
     }
@@ -55,7 +55,7 @@ impl PopularityScoreOp {
     
     /// 根据block_id获取对应的DataServer和tokens，为每个block_id任取一个server_socket
     /// 返回: Vec<(block_id, DataServer, tokens)>
-    pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<(u64, DataServer, Vec<i32>)> {
+    pub async fn get_instance_from_block_id(&self, ids: Vec<u64>) -> Vec<(u64, DataServer, Vec<i64>)> {
         
         let remote_kvcache_table = &self.shared.global_kvcache_table;
         let data_server_collect = self.shared.data_server_collect.read().await;

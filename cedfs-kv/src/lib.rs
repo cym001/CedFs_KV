@@ -22,10 +22,10 @@ pub mod convert;
 
 #[derive(Clone)]
 pub struct Shared{
-    // 推理节点信息
+    // 本域内推理节点信息
     pub data_server_collect: Arc<RwLock<Vec<DataServer>>>,
 
-    // 元数据服务器信息
+    // 各域间元数据服务器信息
     pub meta_server_collect: Arc<RwLock<Vec<MetaServer>>>,
 
     // Block ID 生成器
@@ -77,7 +77,6 @@ impl KVServer {
                     }
                 }
                 let data_servers = Arc::new(RwLock::new(Vec::new()));
-                data_servers.write().await.push(config.local_data_server.clone());
 
                 let meta_hash_id = config.local_meta_server.hash_id();
 
@@ -349,9 +348,10 @@ impl Shared {
     /// 返回: (block_id, is_new, is_primary)
     pub fn find_or_create_kv_block(
         &self,
-        model_hash: i32,
-        token_hash: i32,
-        tokens: Vec<i32>,
+        server_id: u32,
+        model_hash: i64,
+        token_hash: i64,
+        tokens: Vec<i64>,
     ) -> u64 {
         let key = KvBlockKey::new(model_hash, token_hash);
 
@@ -366,12 +366,12 @@ impl Shared {
                 }
                 if let Some(mut meta) = self.global_kvcache_table.get_mut(&block_id) {
                     if meta.tokens_match(&tokens) {
-                        meta.add_replica(self.config.local_data_server.id);
+                        meta.add_replica(server_id);
                         self.local_kvcache_table.insert(block_id, meta.clone());
                         let update_op = UpdateKvOp{
                             block_id: meta.block_id,
                             operation: 1, 
-                            server_id: self.config.local_data_server.id,
+                            server_id: server_id,
                         };
                         self.update_kvop_table.insert(meta.block_id, update_op);
                         return block_id;
@@ -389,7 +389,7 @@ impl Shared {
             token_hash,
             model_hash,
             tokens,
-            server_id: vec![self.config.local_data_server.id],
+            server_id: vec![server_id],
         };
 
         // 插入元数据
@@ -408,9 +408,9 @@ impl Shared {
     /// 查找已存在的KV块（不创建）
     pub fn find_kv_block(
         &self,
-        model_hash: i32,
-        token_hash: i32,
-        tokens: &[i32],
+        model_hash: i64,
+        token_hash: i64,
+        tokens: &[i64],
     ) -> Option<u64> {
         let key = KvBlockKey::new(model_hash, token_hash);
         

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 struct MoveRequest {
     old_position: Vec<String>,
     new_position: Vec<String>,
-    tokens: Vec<i32>,
+    tokens: Vec<i64>,
 }
 
 pub struct MoveKVReplicaOp {
@@ -27,7 +27,7 @@ impl MoveKVReplicaOp {
         &self,
         old_position: Vec<String>,
         new_position: Vec<String>,
-        tokens: Vec<i32>,
+        tokens: Vec<i64>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let request_body = MoveRequest {
             old_position,

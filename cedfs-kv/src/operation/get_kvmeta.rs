@@ -10,7 +10,7 @@ use crate::client::KvCacheClient;
 pub struct GetKvMetaOp {
     pub shared: Shared,
     pub new_meta_server: MetaServer,
-    pub new_data_server: DataServer,
+    pub new_data_server: Vec<DataServer>,
 }
 
 impl GetKvMetaOp {
@@ -39,7 +39,7 @@ impl GetKvMetaOp {
             .collect();
 
         // 更新本地元数据和数据服务器信息
-        KvCacheClient::update_server_status(&self.shared, vec![self.new_meta_server.clone()], vec![self.new_data_server.clone()]).await;
+        KvCacheClient::update_server_status(&self.shared, vec![self.new_meta_server.clone()], self.new_data_server.clone()).await;
 
         tracing::info!("GetKvMetaOp: Send {} local KV block metas, {} meta servers, {} data servers, and {} local block counts.",
             meta.len(), meta_server.len(), data_server.len(), local_counts.len());

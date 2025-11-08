@@ -2,14 +2,13 @@ use std::path::PathBuf;
 
 use derive_builder::Builder;
 
-use crate::{DataServer, MetaServer};
+use crate::{MetaServer};
 
 #[derive(Debug, Builder)]
 pub struct Config {
     pub loaded_config: config::Config,
 
     //本地节点信息
-    pub local_data_server: DataServer,
     pub local_meta_server: MetaServer,
 
     // kvcache元数据同步间隔，单位秒
@@ -39,10 +38,7 @@ impl Config {
     pub fn build_with_config(path: PathBuf) -> Result<Self, ConfigError> {
         let config = Self::load_from_file(&path)?;
         
-        // 从配置中提取各个字段
-        let local_data_server: DataServer = config.get("local_data_server")
-            .map_err(|e| ConfigError::MissingField(format!("local_data_server: {}", e)))?;
-        
+        // 从配置中提取各个字段        
         let local_meta_server: MetaServer = config.get("local_meta_server")
             .map_err(|e| ConfigError::MissingField(format!("local_meta_server: {}", e)))?;
         
@@ -69,7 +65,6 @@ impl Config {
         
         Ok(ConfigBuilder::default()
             .loaded_config(config)
-            .local_data_server(local_data_server)
             .local_meta_server(local_meta_server)
             .sync_interval(sync_interval)
             .request_timeout(request_timeout)

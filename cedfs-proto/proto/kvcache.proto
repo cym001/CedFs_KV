@@ -13,8 +13,7 @@ message DataServer {
     string ip = 2;                      // IP地址（字符串形式）
     uint32 http_port = 3;               // http端口
     uint32 rpc_port = 4;                // rpc端口
-    uint32 layer = 5;                   // 网络层级
-    repeated string instance = 6;       // 实例类型
+    string model_name = 5;              // 模型名称
 }
 
 // 元数据服务器信息
@@ -26,16 +25,16 @@ message MetaServer {
 
 message KvBlockMeta {
     uint64 block_id = 1;                // 块 ID  
-    int32 token_hash = 2;              // 块哈希值
-    int32 model_hash = 3;              // 模型哈希值
-    repeated int32 tokens = 4;          // token ids
+    int64 token_hash = 2;              // 块哈希值
+    int64 model_hash = 3;              // 模型哈希值
+    repeated int64 tokens = 4;          // token ids
     repeated uint32 server_id = 5;      // 副本所在服务器
 }
 
 message UploadKvBlockMeta {
-    int32 token_hash = 1;              // 块哈希值
-    int32 model_hash = 2;              // 模型哈希值
-    repeated int32 tokens = 3;          // token ids
+    int64 token_hash = 1;              // 块哈希值
+    int64 model_hash = 2;              // 模型哈希值
+    repeated int64 tokens = 3;          // token ids
     uint32 kv_ref = 4;                  // 引用计数
 }
 
@@ -55,7 +54,7 @@ message UpdateKvOp {
 // 1. GetKvMeta - 获取副本列表
 message GetKvMetaRequest {
     MetaServer meta_server = 1; // 本地节点的元数据服务器信息
-    DataServer data_server = 2; // 本地节点的数据服务器信息
+    repeated DataServer data_server = 2; // 本地节点的数据服务器信息
 }
 
 message GetKvMetaResponse {
@@ -82,26 +81,26 @@ message UpdateKvMetaResponse {
 
 
 service KvMeta2Data {
-    rpc GetLocalKvMeta(GetLocalKvMetaRequest) returns (GetLocalKvMetaResponse);
     rpc UploadKvMeta(UploadKvMetaRequest) returns (UploadKvMetaResponse);
+    rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse);
 }
 
-
-// 1.数据服务器向元数据服务器发送全部kvblockmeta
-message GetLocalKvMetaRequest {
-    repeated UploadKvBlockMeta kvmeta = 1; 
-}
-
-message GetLocalKvMetaResponse {
-    bool success = 1;
-}
-
-// 2.数据服务器向元数据服务器上传本地新增kvcache元数据
+// 1.数据服务器向元数据服务器上传本地新增kvcache元数据
 message UploadKvMetaRequest {
-    repeated UploadKvBlockMeta kvmeta = 1; 
+    uint32 server_id = 1;
+    repeated UploadKvBlockMeta kvmeta = 2; 
 }
 
 message UploadKvMetaResponse {
+    bool success = 1;
+}
+
+// 2.数据服务器向元数据服务器注册推理实例信息
+message RegisterInstanceRequest {
+    DataServer data_server = 1; 
+}
+
+message RegisterInstanceResponse {
     bool success = 1;
 }
 

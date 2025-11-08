@@ -6,6 +6,7 @@ use crate::Shared;
 use crate::types::{UpdateKvOp};
 
 pub struct UploadKvMetaOp {
+    pub server_id: u32,
     pub kv_meta: Vec<UploadKvBlockMeta>,
     pub shared: Shared,
 }
@@ -21,9 +22,9 @@ impl UploadKvMetaOp {
             //     let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone());
             //     self.shared.ref_count.increment_local_incremental_count(block_id, block.kv_ref);
             // }
-            let block_id = self.shared.find_or_create_kv_block(block.model_hash, block.token_hash, block.tokens.clone());
+            let block_id = self.shared.find_or_create_kv_block(self.server_id, block.model_hash, block.token_hash, block.tokens.clone());
             self.shared.ref_count.increment_local_incremental_count(block_id, block.kv_ref as u64);
-            
+            tracing::info!("UploadKvMetaOp: model_hash: {}, token_hash: {}", block.model_hash, block.token_hash);
         }
         tracing::info!("UploadKvMetaOp: Uploaded {} local KV block metas.",self.kv_meta.len());
         Ok(())

@@ -29,7 +29,7 @@ impl KvMeta2Meta for KvCacheMetaService{
         let resp = GetKvMetaOp {
             shared: self.shared.clone(),
             new_meta_server: _req.meta_server.unwrap().into(),
-            new_data_server: _req.data_server.unwrap().into(),
+            new_data_server: _req.data_server.into_iter().map(|d| d.into()).collect(),
         }.run().await;
         
         match resp {

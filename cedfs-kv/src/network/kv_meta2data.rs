@@ -2,11 +2,11 @@ use tonic::{Request, Response, Status};
 
 use cedfs_proto::kvcache::kv_meta2_data_server::{KvMeta2Data};
 use cedfs_proto::kvcache::{
-    GetLocalKvMetaRequest, GetLocalKvMetaResponse,
     UploadKvMetaRequest, UploadKvMetaResponse,
+    RegisterInstanceRequest, RegisterInstanceResponse,
 };
 use crate::Shared;
-use crate::operation::{upload_kvmeta::UploadKvMetaOp, get_local_kvmeta::GetLocalKvMetaOp};
+use crate::operation::{upload_kvmeta::UploadKvMetaOp};
 
 pub struct KvCacheDataService {
     pub(crate) shared: Shared,
@@ -15,23 +15,6 @@ pub struct KvCacheDataService {
 
 #[tonic::async_trait]
 impl KvMeta2Data for KvCacheDataService{
-    /// 获取本地KV元数据
-    async fn get_local_kv_meta(
-        &self,
-        request: Request<GetLocalKvMetaRequest>,
-    ) -> Result<Response<GetLocalKvMetaResponse>, Status> {
-        tracing::info!("get_local_kv_meta request received");
-        let req = request.into_inner();
-        let resp = GetLocalKvMetaOp {
-            kv_meta: req.kvmeta,
-            shared: self.shared.clone(),
-        }.run();
-        match resp {
-            Ok(_) => Ok(Response::new(GetLocalKvMetaResponse {success: true,})),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
-    }
-
     /// 上传KV元数据
     async fn upload_kv_meta(
         &self,
@@ -40,11 +23,29 @@ impl KvMeta2Data for KvCacheDataService{
         tracing::info!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = UploadKvMetaOp {
+            server_id: req.server_id,
             kv_meta: req.kvmeta,
             shared: self.shared.clone(),
         }.run();
         match resp {
             Ok(_) => Ok(Response::new(UploadKvMetaResponse {success: true,})),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    /// 注册推理实例信息
+    async fn register_instance(&self,
+        request: Request<RegisterInstanceRequest>,
+    ) -> Result<Response<RegisterInstanceResponse>, Status>{
+        tracing::info!("register_instance request received");
+        let _req = request.into_inner();
+        let _op = crate::operation::register_instance::RegisterInstanceOp{
+            data_server: _req.data_server.into_iter().map(|d| d.into()).collect(),
+            shared: self.shared.clone(),
+        };
+        let resp = _op.run().await;
+        match resp {
+            Ok(_) => Ok(Response::new(RegisterInstanceResponse {success: true,})),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
