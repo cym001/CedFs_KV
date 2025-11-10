@@ -40,7 +40,7 @@ impl KvMeta2Data for KvCacheDataService{
         tracing::info!("register_instance request received");
         let _req = request.into_inner();
         let _op = crate::operation::register_instance::RegisterInstanceOp{
-            data_server: _req.data_server.into_iter().map(|d| d.into()).collect(),
+            data_server: _req.data_server.unwrap().into(),
             shared: self.shared.clone(),
         };
         let resp = _op.run().await;

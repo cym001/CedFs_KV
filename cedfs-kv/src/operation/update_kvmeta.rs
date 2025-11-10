@@ -3,11 +3,12 @@ use std::collections::HashMap;
 use anyhow::Ok;
 
 use crate::Shared;
-use crate::types::{KvBlockMeta};
+use crate::types::{KvBlockMeta, UpdateKvOp};
 
 pub struct UpdateKvMetaOp {
     pub kv_meta: Vec<KvBlockMeta>,
     pub kv_ref: HashMap<u64, u64>,
+    pub update_op: Vec<UpdateKvOp>,
     pub shared: Shared,
 }
 
@@ -21,6 +22,14 @@ impl UpdateKvMetaOp {
         for (k, v) in self.kv_ref.iter() {
             self.shared.ref_count.increment_global_ref_count(*k,*v);
         }
+        for op in self.update_op.iter(){
+            let res = self.shared.execute_update_kvop(op.clone());
+            if let Err(e) = res {
+                tracing::error!("UpdateKvMetaOp: Failed to execute update kv op: {:?}", e);
+                return Err(e.into());
+            }
+        }
+
         
         tracing::info!("UpdateKvMetaOp: Updated {} remote KV block metas and {} global block counts.",
             self.kv_meta.len(), self.kv_ref.len());

@@ -48,6 +48,7 @@ impl KvMeta2Meta for KvCacheMetaService{
         let resp = UpdateKvMetaOp {
             kv_meta: _req.meta.into_iter().map(|m| m.into()).collect(),
             kv_ref: _req.local_counts.into_iter().map(|lc| (lc.block_id, lc.count)).collect(),
+            update_op: _req.update_op.into_iter().map(|op| op.into()).collect(),
             shared: self.shared.clone(),
         }.run();
         match resp {

@@ -374,6 +374,7 @@ impl Shared {
                             server_id: server_id,
                         };
                         self.update_kvop_table.insert(meta.block_id, update_op);
+                        self.local_kvcache_table.insert(block_id, meta.clone());
                         return block_id;
                     }
                 }
@@ -393,7 +394,9 @@ impl Shared {
         };
 
         // 插入元数据
-        self.insert_local_kvcache(meta);
+        self.insert_local_kvcache(meta.clone());
+        self.insert_remote_kvcache(meta.clone());
+        self.insert_update_kvcache(meta);
         
         // 将新的 block_id 添加到索引的 Vec 中（处理哈希冲突）
         self.global_kv_index
