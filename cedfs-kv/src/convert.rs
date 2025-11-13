@@ -1,4 +1,6 @@
 use std::net::{IpAddr};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
 use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
@@ -11,7 +13,7 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
         KvBlockMeta {
             block_id: proto.block_id,
             token_hash: proto.token_hash,
-            model_hash: proto.model_hash,
+            //model_hash: proto.model_hash,
             tokens: proto.tokens,
             server_id: proto.server_id,
         }
@@ -24,7 +26,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
         ProtoKvBlockMeta {
             block_id: internal.block_id,
             token_hash: internal.token_hash,
-            model_hash: internal.model_hash,
+            //model_hash: internal.model_hash,
             tokens: internal.tokens,
             server_id: internal.server_id,
         }
@@ -98,4 +100,11 @@ impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
         }
     }
     
+}
+
+// Token hash 计算
+pub fn calculate_token_hash(tokens: &[i64]) -> i64 { 
+    let mut hasher = DefaultHasher::new();
+    tokens.hash(&mut hasher);
+    hasher.finish() as i64
 }

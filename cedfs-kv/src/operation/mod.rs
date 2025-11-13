@@ -4,3 +4,4 @@ pub mod update_kvmeta;
 pub mod upload_kvmeta;
 pub mod get_kvmeta;
 pub mod register_instance;
+pub mod search_kv;

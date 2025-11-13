@@ -5,11 +5,13 @@ use cedfs_proto::kvcache::{
     kv_meta2_meta_server::KvMeta2Meta,
     GetKvMetaRequest, GetKvMetaResponse,
     UpdateKvMetaRequest, UpdateKvMetaResponse, 
+    SearchKvBlockRequest, SearchKvBlockResponse, 
 };
 
 use crate::Shared;
 use crate::operation::get_kvmeta::GetKvMetaOp;
 use crate::operation::update_kvmeta::UpdateKvMetaOp;
+use crate::operation::search_kv::SearchKvOp;
 
 pub struct KvCacheMetaService {
     pub(crate) shared: Shared,
@@ -58,5 +60,35 @@ impl KvMeta2Meta for KvCacheMetaService{
                 .clone().into_iter().map(|d| d.into()).collect()})),
             Err(e) => Err(Status::internal(e.to_string())), 
         }    
+    }
+
+    /// 搜索KV块
+    async fn search_kv_block(
+        &self,
+        request: Request<SearchKvBlockRequest>,
+    ) -> Result<Response<SearchKvBlockResponse>, Status> {
+        tracing::info!("search_kv_block request received");
+        let _req = request.into_inner();
+        
+        // 将 proto 的 Token_lists 转换为 Vec<Vec<Vec<i64>>>
+        let query_lists: Vec<Vec<Vec<i64>>> = _req.query_lists
+            .into_iter()
+            .map(|token_list| {
+                token_list.tokens_list
+                    .into_iter()
+                    .map(|tokens| tokens.tokens)
+                    .collect()
+            })
+            .collect();
+        
+        let resp = SearchKvOp {
+            shared: self.shared.clone(),
+            query_lists,
+        }.run().await;
+        
+        match resp {
+            Ok(response) => Ok(Response::new(response)),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
     }
 }

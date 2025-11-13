@@ -7,7 +7,7 @@ use tracing::info;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 
-use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp, KvBlockKey, BlockIdGenerator};
+use crate::types::{KvBlockMeta, DataServer, RefCount, MetaServer, UpdateKvOp, BlockIdGenerator};
 use crate::config::Config;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::network::kv_meta2data::KvCacheDataService;
@@ -36,7 +36,7 @@ pub struct Shared{
 
     // 全局KV块索引：(model_hash, token_hash) -> Vec<block_id>
     // 使用 Vec 存储多个 block_id 来处理哈希冲突
-    pub global_kv_index: Arc<DashMap<KvBlockKey, Vec<u64>>>,
+    pub global_kv_index: Arc<DashMap<i64, Vec<u64>>>,
 
     // 远程kv块元数据
     pub global_kvcache_table: Arc<DashMap<u64, KvBlockMeta>>,
@@ -349,11 +349,12 @@ impl Shared {
     pub fn find_or_create_kv_block(
         &self,
         server_id: u32,
-        model_hash: i64,
+        //model_hash: i64,
         token_hash: i64,
         tokens: Vec<i64>,
     ) -> u64 {
-        let key = KvBlockKey::new(model_hash, token_hash);
+        // let key = KvBlockKey::new(model_hash, token_hash);
+        let key = token_hash;
 
         // 第一步：通过哈希快速查找所有候选块
         if let Some(block_ids) = self.global_kv_index.get(&key) {
@@ -388,7 +389,7 @@ impl Shared {
         let meta = KvBlockMeta {
             block_id,
             token_hash,
-            model_hash,
+            //model_hash,
             tokens,
             server_id: vec![server_id],
         };
@@ -411,11 +412,12 @@ impl Shared {
     /// 查找已存在的KV块（不创建）
     pub fn find_kv_block(
         &self,
-        model_hash: i64,
+        //model_hash: i64,
         token_hash: i64,
         tokens: &[i64],
     ) -> Option<u64> {
-        let key = KvBlockKey::new(model_hash, token_hash);
+        //let key = KvBlockKey::new(model_hash, token_hash);
+        let key = token_hash;
         
         // 遍历所有同哈希的块，查找tokens匹配的
         self.global_kv_index.get(&key).and_then(|block_ids| {
