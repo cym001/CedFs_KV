@@ -10,9 +10,7 @@ use serde::{Serialize, Deserialize};
 /// 元数据
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KvBlockMeta {
-    // 块 ID(前32位node_id， 后32位node内块id)
-    // pub token_hash: u64,              
-
+             
     // 块哈希值
     pub token_hash: [u8; 32],            
 
@@ -193,6 +191,20 @@ impl RefCount {
             .or_insert(increment);
     }
 
+    /// 批量增加本地增量计数
+    /// 
+    /// # 参数
+    /// - `token_hashes`: 块 ID 列表
+    /// - `increment`: 每个块的增量值
+    pub fn batch_increment_local_incremental_count(&self, token_hashes: &[[u8; 32]], increment: u64) {
+        for &token_hash in token_hashes {
+            self.local_incremental_count
+                .entry(token_hash)
+                .and_modify(|c| *c += increment)
+                .or_insert(increment);
+        }
+    }
+
     /// 插入或更新本地完整引用计数
     /// 
     /// # 参数
@@ -218,6 +230,8 @@ impl RefCount {
             .or_insert(increment)
             .clone()
     }
+
+
 
     /// 合并指定块的增量计数到完整计数
     /// 
