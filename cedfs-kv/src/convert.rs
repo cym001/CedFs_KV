@@ -1,6 +1,4 @@
 use std::net::{IpAddr};
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
 use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
@@ -11,10 +9,8 @@ use crate::types::{KvBlockMeta, MetaServer, DataServer, UpdateKvOp};
 impl From<ProtoKvBlockMeta> for KvBlockMeta {
     fn from(proto: ProtoKvBlockMeta) -> Self {
         KvBlockMeta {
-            block_id: proto.block_id,
-            token_hash: proto.token_hash,
-            //model_hash: proto.model_hash,
-            tokens: proto.tokens,
+            token_hash: bytes2hash(proto.token_hash),
+            next_tokens: vecbytes2vechash(proto.next_tokens),
             server_id: proto.server_id,
         }
     }
@@ -24,10 +20,8 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
 impl From<KvBlockMeta> for ProtoKvBlockMeta {
     fn from(internal: KvBlockMeta) -> Self {
         ProtoKvBlockMeta {
-            block_id: internal.block_id,
-            token_hash: internal.token_hash,
-            //model_hash: internal.model_hash,
-            tokens: internal.tokens,
+            token_hash: hash2bytes(internal.token_hash),
+            next_tokens: vechash2vecbytes(internal.next_tokens),
             server_id: internal.server_id,
         }
     }
@@ -84,7 +78,7 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
 impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
     fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
         UpdateKvOp {
-            block_id: proto.block_id,
+            token_hash: bytes2hash(proto.token_hash),
             operation: proto.operation,
             server_id: proto.server_id,
         }
@@ -94,7 +88,7 @@ impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
 impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
     fn from(internal: UpdateKvOp) -> Self {
         cedfs_proto::kvcache::UpdateKvOp {
-            block_id: internal.block_id,
+            token_hash: hash2bytes(internal.token_hash),
             operation: internal.operation,
             server_id: internal.server_id,
         }
@@ -102,9 +96,34 @@ impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
     
 }
 
-// Token hash 计算
-pub fn calculate_token_hash(tokens: &[i64]) -> i64 { 
-    let mut hasher = DefaultHasher::new();
-    tokens.hash(&mut hasher);
-    hasher.finish() as i64
+pub fn hash2bytes(a: [u8; 32]) -> Vec<u8> {
+    a.to_vec()
+}
+
+pub fn bytes2hash(v: Vec<u8>) -> [u8; 32] {
+    if v.len() != 32 {
+        tracing::error!("bytes2hash: input length must be 32, got {}", v.len());
+        return [0u8; 32];
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&v);
+    arr
+}
+
+pub fn vechash2vecbytes(v: Vec<[u8; 32]>) -> Vec<Vec<u8>> {
+    v.into_iter().map(|a| a.to_vec()).collect()
+}
+
+pub fn vecbytes2vechash(v: Vec<Vec<u8>>) -> Vec<[u8; 32]> {
+    let mut out = Vec::with_capacity(v.len());
+    for item in v {
+        if item.len() != 32 {
+            tracing::error!("vecbytes2vechash: item length must be 32, got {}", item.len());
+            continue;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&item);
+        out.push(arr);
+    }
+    out
 }

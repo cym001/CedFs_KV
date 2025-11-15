@@ -2,12 +2,6 @@ syntax = "proto3";
 
 package kvcache;
 
-service KvMeta2Meta {
-    rpc GetKvMeta(GetKvMetaRequest) returns (GetKvMetaResponse);
-    rpc UpdateKvMeta(UpdateKvMetaRequest) returns (UpdateKvMetaResponse);
-    rpc SearchKvBlock(SearchKvBlockRequest) returns (SearchKvBlockResponse);
-}
-
 // 数据服务器信息
 message DataServer {
     uint32 id = 1;         
@@ -25,37 +19,27 @@ message MetaServer {
 }
 
 message KvBlockMeta {
-    uint64 block_id = 1;                // 块 ID  
-    int64 token_hash = 2;              // 块哈希值
-    repeated int64 tokens = 4;          // token ids
-    repeated uint32 server_id = 5;      // 副本所在服务器
-}
-
-message UploadKvBlockMeta {
-    repeated int64 tokens = 1;          // token ids
-    uint32 kv_ref = 2;                  // 引用计数
+    bytes token_hash = 1;               // 块哈希：固定长度 32 字节
+    repeated bytes next_tokens = 2;     // 下一个 token 的 32 字节哈希列表
+    repeated uint32 server_id = 3;      // 副本信息
 }
 
 // 本地单个 block 的引用计数
 message LocalBlockCount {
-    uint64 block_id = 1;            // 块 ID
+    bytes token_hash = 1;           // 块哈希：固定长度 32 字节
     uint64 count = 2;               // 引用计数（定期同步时为增量计数，启动同步时为全量计数）
 }
 
 // 更新kvmeta的操作方式（创建、删除副本时）
 message UpdateKvOp {
-    uint64 block_id = 1;            // 块 ID
+    bytes token_hash = 1;           // 块哈希：固定长度 32 字节
     uint32 operation = 2;           // server_id的修改方式（1为增加，2为删除）
     uint32 server_id = 3;           // server_id
 }
 
 // 分块的token信息
-message Tokens {
-    repeated int64 tokens = 1;          // token ids
-}
-
 message Token_lists {
-    repeated Tokens tokens_list = 1;    // token ids
+    repeated int64 tokens = 1;    // token ids
 }
 
 // kvcache位置信息
@@ -67,6 +51,36 @@ message KvBlockPos {
 
 message SearchResult{
     repeated KvBlockPos block_pos = 1;        // 单个请求的kv cache搜索结果
+}
+
+service KvMeta2Data {
+    rpc UploadKvMeta(UploadKvMetaRequest) returns (UploadKvMetaResponse);
+    rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse);
+}
+
+// 1.数据服务器向元数据服务器上传本地新增kvcache元数据
+message UploadKvMetaRequest {
+    uint32 server_id = 1;
+    repeated int64 tokens = 2; 
+}
+
+message UploadKvMetaResponse {
+    bool success = 1;
+}
+
+// 2.数据服务器向元数据服务器注册推理实例信息
+message RegisterInstanceRequest {
+    DataServer data_server = 1; 
+}
+
+message RegisterInstanceResponse {
+    bool success = 1;
+}
+
+service KvMeta2Meta {
+    rpc GetKvMeta(GetKvMetaRequest) returns (GetKvMetaResponse);
+    rpc UpdateKvMeta(UpdateKvMetaRequest) returns (UpdateKvMetaResponse);
+    rpc SearchKvBlock(SearchKvBlockRequest) returns (SearchKvBlockResponse);
 }
 
 // 1. GetKvMeta - 获取副本列表
@@ -103,29 +117,3 @@ message SearchKvBlockRequest {
 message SearchKvBlockResponse {
     repeated SearchResult results = 1;
 }
-
-
-service KvMeta2Data {
-    rpc UploadKvMeta(UploadKvMetaRequest) returns (UploadKvMetaResponse);
-    rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse);
-}
-
-// 1.数据服务器向元数据服务器上传本地新增kvcache元数据
-message UploadKvMetaRequest {
-    uint32 server_id = 1;
-    repeated UploadKvBlockMeta kvmeta = 2; 
-}
-
-message UploadKvMetaResponse {
-    bool success = 1;
-}
-
-// 2.数据服务器向元数据服务器注册推理实例信息
-message RegisterInstanceRequest {
-    DataServer data_server = 1; 
-}
-
-message RegisterInstanceResponse {
-    bool success = 1;
-}
-

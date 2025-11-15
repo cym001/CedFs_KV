@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use std::hash::{Hash, Hasher};
@@ -12,16 +11,13 @@ use serde::{Serialize, Deserialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KvBlockMeta {
     // 块 ID(前32位node_id， 后32位node内块id)
-    pub block_id: u64,              
+    // pub token_hash: u64,              
 
     // 块哈希值
-    pub token_hash: i64,            
-
-    // 模型哈希值: 
-    // pub model_hash: i64,      
+    pub token_hash: [u8; 32],            
 
     // token ids
-    pub tokens: Vec<i64>,                                              
+    pub next_tokens: Vec<[u8; 32]>,                                              
 
     // 副本信息
     pub server_id: Vec<u32>,      
@@ -32,12 +28,12 @@ pub struct KvBlockMeta {
 /// 引用计数
 #[derive(Debug)]
 pub struct RefCount {
-    /// 本地增量计数 key: block_id, value: incremental_count
-    pub local_incremental_count: DashMap<u64, u64>,
-    /// 本地完整引用计数 key: block_id, value: full_count
-    pub local_ref_counts: DashMap<u64, u64>,
-    /// 全局引用计数 key: block_id, value: count
-    pub global_ref_counts: DashMap<u64, u64>,
+    /// 本地增量计数 key: token_hash, value: incremental_count
+    pub local_incremental_count: DashMap<[u8; 32], u64>,
+    /// 本地完整引用计数 key: token_hash, value: full_count
+    pub local_ref_counts: DashMap<[u8; 32], u64>,
+    /// 全局引用计数 key: token_hash, value: count
+    pub global_ref_counts: DashMap<[u8; 32], u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +71,7 @@ pub struct MetaServer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateKvOp{
 
-    pub block_id: u64,
+    pub token_hash: [u8; 32],
 
     pub operation: u32,
 
@@ -90,10 +86,10 @@ pub struct UpdateKvOp{
 //     pub token_hash: i64,
 // }
 /// 全局块ID生成器
-pub struct BlockIdGenerator {
-    counter: AtomicU64,
-    node_id: u32,
-}
+// pub struct BlockIdGenerator {
+//     counter: AtomicU64,
+//     node_id: u32,
+// }
 
 
 impl Default for DataServer {
@@ -169,13 +165,13 @@ impl RefCount {
     pub fn clear_and_consolidate_incremental_counts(&self) {
         // 遍历所有增量计数
         for entry in self.local_incremental_count.iter() {
-            let block_id = *entry.key();
+            let token_hash = *entry.key();
             let incremental = *entry.value();
             
             if incremental > 0 {
                 // 更新本地完整计数
                 self.local_ref_counts
-                    .entry(block_id)
+                    .entry(token_hash)
                     .and_modify(|c| *c += incremental)
                     .or_insert(incremental);
             }
@@ -188,11 +184,11 @@ impl RefCount {
     /// 增加本地增量计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `increment`: 增量值
-    pub fn increment_local_incremental_count(&self, block_id: u64, increment: u64) {
+    pub fn increment_local_incremental_count(&self, token_hash: [u8; 32], increment: u64) {
         self.local_incremental_count
-            .entry(block_id)
+            .entry(token_hash)
             .and_modify(|c| *c += increment)
             .or_insert(increment);
     }
@@ -200,24 +196,24 @@ impl RefCount {
     /// 插入或更新本地完整引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `count`: 计数值
     /// 
     /// # 返回
     /// - `Some(old_count)`: 更新已存在的块，返回旧值
     /// - `None`: 插入新块
-    pub fn insert_or_update_local_ref_count(&self, block_id: u64, count: u64) -> Option<u64> {
-        self.local_ref_counts.insert(block_id, count)
+    pub fn insert_or_update_local_ref_count(&self, token_hash: [u8; 32], count: u64) -> Option<u64> {
+        self.local_ref_counts.insert(token_hash, count)
     }
 
     /// 增加本地完整引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `increment`: 增量值
-    pub fn increment_local_ref_count(&self, block_id: u64, increment: u64) -> u64 {
+    pub fn increment_local_ref_count(&self, token_hash: [u8; 32], increment: u64) -> u64 {
         self.local_ref_counts
-            .entry(block_id)
+            .entry(token_hash)
             .and_modify(|c| *c += increment)
             .or_insert(increment)
             .clone()
@@ -226,36 +222,36 @@ impl RefCount {
     /// 合并指定块的增量计数到完整计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// 
     /// # 返回
     /// - `Some(total_count)`: 合并后的总计数
     /// - `None`: 该块不存在增量计数
-    pub fn consolidate_local_ref_count(&self, block_id: u64) -> Option<u64> {
-        if let Some((_, incremental)) = self.local_incremental_count.remove(&block_id) {
+    pub fn consolidate_local_ref_count(&self, token_hash: [u8; 32]) -> Option<u64> {
+        if let Some((_, incremental)) = self.local_incremental_count.remove(&token_hash) {
             if incremental > 0 {
                 let total = self.local_ref_counts
-                    .entry(block_id)
+                    .entry(token_hash)
                     .and_modify(|c| *c += incremental)
                     .or_insert(incremental)
                     .clone();
                 return Some(total);
             }
         }
-        self.local_ref_counts.get(&block_id).map(|v| *v)
+        self.local_ref_counts.get(&token_hash).map(|v| *v)
     }
 
     /// 获取本地块的总引用计数(完整计数 + 增量计数)
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// 
     /// # 返回
     /// - `Some(total)`: 总计数
     /// - `None`: 该块不存在任何计数
-    pub fn get_local_total_count(&self, block_id: u64) -> Option<u64> {
-        let full_count = self.local_ref_counts.get(&block_id).map(|v| *v).unwrap_or(0);
-        let incremental_count = self.local_incremental_count.get(&block_id).map(|v| *v).unwrap_or(0);
+    pub fn get_local_total_count(&self, token_hash: [u8; 32]) -> Option<u64> {
+        let full_count = self.local_ref_counts.get(&token_hash).map(|v| *v).unwrap_or(0);
+        let incremental_count = self.local_incremental_count.get(&token_hash).map(|v| *v).unwrap_or(0);
         
         if full_count == 0 && incremental_count == 0 {
             None
@@ -267,28 +263,28 @@ impl RefCount {
     /// 插入或更新全局引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `count`: 新的计数值
     /// 
     /// # 返回
     /// - `Some(old_count)`: 更新已存在的块，返回旧值
     /// - `None`: 插入新块
-    pub fn insert_or_update_global_ref_count(&self, block_id: u64, count: u64) -> Option<u64> {
-        self.global_ref_counts.insert(block_id, count)
+    pub fn insert_or_update_global_ref_count(&self, token_hash: [u8; 32], count: u64) -> Option<u64> {
+        self.global_ref_counts.insert(token_hash, count)
     }
 
     /// 增加全局引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `increment`: 增量值
-    pub fn increment_global_ref_count(&self, block_id: u64, increment: u64) -> u64 {
+    pub fn increment_global_ref_count(&self, token_hash: [u8; 32], increment: u64) -> u64 {
         // 判断id是否在本地存在，存在则增加本地计数
-        if self.local_ref_counts.contains_key(&block_id) {
-            self.increment_local_ref_count(block_id, increment)
+        if self.local_ref_counts.contains_key(&token_hash) {
+            self.increment_local_ref_count(token_hash, increment)
         }else{
             self.global_ref_counts
-            .entry(block_id)
+            .entry(token_hash)
             .and_modify(|c| *c += increment)
             .or_insert(increment)
             .clone()
@@ -299,10 +295,10 @@ impl RefCount {
     /// 减少全局引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// - `decrement`: 减量值
-    pub fn decrement_global_ref_count(&self, block_id: u64, decrement: u64) -> Option<u64> {
-        self.global_ref_counts.get_mut(&block_id).map(|mut entry| {
+    pub fn decrement_global_ref_count(&self, token_hash: [u8; 32], decrement: u64) -> Option<u64> {
+        self.global_ref_counts.get_mut(&token_hash).map(|mut entry| {
             *entry = entry.saturating_sub(decrement);
             *entry
         })
@@ -311,31 +307,31 @@ impl RefCount {
     /// 删除本地引用计数（包括增量和完整计数）
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
+    /// - `token_hash`: 块 ID
     /// 
     /// # 返回
     /// - `(full_count, incremental_count)`: 删除的计数值
-    pub fn remove_local_ref_count(&self, block_id: u64) -> (Option<u64>, Option<u64>) {
-        let full = self.local_ref_counts.remove(&block_id).map(|(_, v)| v);
-        let incremental = self.local_incremental_count.remove(&block_id).map(|(_, v)| v);
+    pub fn remove_local_ref_count(&self, token_hash: [u8; 32]) -> (Option<u64>, Option<u64>) {
+        let full = self.local_ref_counts.remove(&token_hash).map(|(_, v)| v);
+        let incremental = self.local_incremental_count.remove(&token_hash).map(|(_, v)| v);
         (full, incremental)
     }
 
     /// 删除全局引用计数
     /// 
     /// # 参数
-    /// - `block_id`: 块 ID
-    pub fn remove_global_ref_count(&self, block_id: u64) -> Option<u64> {
-        self.global_ref_counts.remove(&block_id).map(|(_, v)| v)
+    /// - `token_hash`: 块 ID
+    pub fn remove_global_ref_count(&self, token_hash: [u8; 32]) -> Option<u64> {
+        self.global_ref_counts.remove(&token_hash).map(|(_, v)| v)
     }
 
     /// 批量更新全局引用计数
     /// 
     /// # 参数
-    /// - `updates`: (block_id, count) 元组的向量
-    pub fn batch_update_global_ref_counts(&self, updates: Vec<(u64, u64)>) {
-        for (block_id, count) in updates {
-            self.insert_or_update_global_ref_count(block_id, count);
+    /// - `updates`: (token_hash, count) 元组的向量
+    pub fn batch_update_global_ref_counts(&self, updates: Vec<([u8; 32], u64)>) {
+        for (token_hash, count) in updates {
+            self.insert_or_update_global_ref_count(token_hash, count);
         }
     }
 
@@ -348,11 +344,11 @@ impl RefCount {
     /// 获取所有本地块的总引用计数(完整计数 + 增量计数)
     /// 
     /// # 返回
-    /// - `Vec<(block_id, total_count)>`: 所有块的 ID 和总计数
-    pub fn get_all_local_total_counts(&self) -> Vec<(u64, u64)> {
+    /// - `Vec<(token_hash, total_count)>`: 所有块的 ID 和总计数
+    pub fn get_all_local_total_counts(&self) -> Vec<([u8; 32], u64)> {
         use std::collections::HashMap;
         
-        let mut counts: HashMap<u64, u64> = HashMap::new();
+        let mut counts: HashMap<[u8; 32], u64> = HashMap::new();
         
         // 收集所有完整计数
         for entry in self.local_ref_counts.iter() {
@@ -381,35 +377,35 @@ impl RefCount {
 //     }
 // }
 
-impl BlockIdGenerator {
-    pub fn new(node_id: u32) -> Self {
-        Self {
-            counter: AtomicU64::new(0),
-            node_id,
-        }
-    }
+// impl BlockIdGenerator {
+//     pub fn new(node_id: u32) -> Self {
+//         Self {
+//             counter: AtomicU64::new(0),
+//             node_id,
+//         }
+//     }
 
-    /// 生成新的block_id（前32位node_id，后32位自增ID）
-    pub fn next_id(&self) -> u64 {
-        let local_id = self.counter.fetch_add(1, Ordering::SeqCst);
-        ((self.node_id as u64) << 32) | (local_id & 0xFFFFFFFF)
-    }
+//     /// 生成新的token_hash（前32位node_id，后32位自增ID）
+//     pub fn next_id(&self) -> u64 {
+//         let local_id = self.counter.fetch_add(1, Ordering::SeqCst);
+//         ((self.node_id as u64) << 32) | (local_id & 0xFFFFFFFF)
+//     }
 
-    /// 从block_id提取node_id
-    pub fn extract_node_id(block_id: u64) -> u32 {
-        (block_id >> 32) as u32
-    }
+//     /// 从token_hash提取node_id
+//     pub fn extract_node_id(token_hash: u64) -> u32 {
+//         (token_hash >> 32) as u32
+//     }
 
-    /// 从block_id提取本地ID
-    pub fn extract_local_id(block_id: u64) -> u32 {
-        (block_id & 0xFFFFFFFF) as u32
-    }
-}
+//     /// 从token_hash提取本地ID
+//     pub fn extract_local_id(token_hash: u64) -> u32 {
+//         (token_hash & 0xFFFFFFFF) as u32
+//     }
+// }
 
 impl KvBlockMeta {
     /// 检查tokens是否完全匹配
-    pub fn tokens_match(&self, tokens: &[i64]) -> bool {
-        self.tokens == tokens
+    pub fn tokens_match(&self, token_hash: [u8; 32]) -> bool {
+        self.token_hash == token_hash
     }
 
     /// 添加副本服务器

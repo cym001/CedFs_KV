@@ -24,9 +24,9 @@ impl KvMeta2Data for KvCacheDataService{
         let req = request.into_inner();
         let resp = UploadKvMetaOp {
             server_id: req.server_id,
-            kv_meta: req.kvmeta,
+            tokens: req.tokens,
             shared: self.shared.clone(),
-        }.run();
+        }.run().await;
         match resp {
             Ok(_) => Ok(Response::new(UploadKvMetaResponse {success: true,})),
             Err(e) => Err(Status::internal(e.to_string())),

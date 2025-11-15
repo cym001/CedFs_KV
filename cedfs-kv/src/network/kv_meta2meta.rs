@@ -12,6 +12,7 @@ use crate::Shared;
 use crate::operation::get_kvmeta::GetKvMetaOp;
 use crate::operation::update_kvmeta::UpdateKvMetaOp;
 use crate::operation::search_kv::SearchKvOp;
+use crate::convert::bytes2hash;
 
 pub struct KvCacheMetaService {
     pub(crate) shared: Shared,
@@ -49,10 +50,10 @@ impl KvMeta2Meta for KvCacheMetaService{
         let _req = request.into_inner();
         let resp = UpdateKvMetaOp {
             kv_meta: _req.meta.into_iter().map(|m| m.into()).collect(),
-            kv_ref: _req.local_counts.into_iter().map(|lc| (lc.block_id, lc.count)).collect(),
+            kv_ref: _req.local_counts.into_iter().map(|lc| (bytes2hash(lc.token_hash), lc.count)).collect(),
             update_op: _req.update_op.into_iter().map(|op| op.into()).collect(),
             shared: self.shared.clone(),
-        }.run();
+        }.run().await;
         match resp {
             Ok(_) => Ok(Response::new(UpdateKvMetaResponse {meta_server: (*self.shared.meta_server_collect)
                 .read().await.clone().into_iter().map(|m| m.into()).collect()
@@ -71,14 +72,9 @@ impl KvMeta2Meta for KvCacheMetaService{
         let _req = request.into_inner();
         
         // 将 proto 的 Token_lists 转换为 Vec<Vec<Vec<i64>>>
-        let query_lists: Vec<Vec<Vec<i64>>> = _req.query_lists
+        let query_lists: Vec<Vec<i64>> = _req.query_lists
             .into_iter()
-            .map(|token_list| {
-                token_list.tokens_list
-                    .into_iter()
-                    .map(|tokens| tokens.tokens)
-                    .collect()
-            })
+            .map(|token_list| {token_list.tokens})
             .collect();
         
         let resp = SearchKvOp {

@@ -32,6 +32,15 @@ pub struct Config {
     // 日志文件路径
     pub log_file: String,
 
+    // kv_block大小
+    pub block_size: usize,
+
+    // 是否支持不满的kv块
+    pub unfull_chunk: bool,
+
+    // 采用的hash算法
+    pub hash_algorithm: String,
+
 }
 
 impl Config {
@@ -62,6 +71,15 @@ impl Config {
         
         let log_file: String = config.get("log_file")
             .map_err(|e| ConfigError::MissingField(format!("log_file: {}", e)))?;
+
+        let block_size: usize = config.get("block_size")
+            .map_err(|e| ConfigError::MissingField(format!("block_size: {}", e)))?;
+
+        let unfull_chunk: bool = config.get("unfull_chunk")
+            .map_err(|e| ConfigError::MissingField(format!("unfull_chunk: {}", e)))?;
+
+        let hash_algorithm: String = config.get("hash_algorithm")
+            .map_err(|e| ConfigError::MissingField(format!("hash_algorithm: {}", e)))?;
         
         Ok(ConfigBuilder::default()
             .loaded_config(config)
@@ -73,6 +91,9 @@ impl Config {
             .replica_pull_count(replica_pull_count)
             .log_level(log_level)
             .log_file(log_file)
+            .block_size(block_size)
+            .unfull_chunk(unfull_chunk)
+            .hash_algorithm(hash_algorithm)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

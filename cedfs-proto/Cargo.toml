@@ -12,7 +12,7 @@ chrono = { workspace = true }
 derive_builder = { workspace = true }
 iota = { workspace = true }
 prost = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
 tonic = { workspace = true }
 
 [build-dependencies]
