@@ -28,6 +28,7 @@ tonic = { workspace = true }
 thiserror = { workspace = true }
 trait-variant = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true}
+tracing-subscriber = { workspace = true }
+tokenizers = { workspace = true , features = ["http"]}
 
 cedfs-proto = { version = "*", path = "../cedfs-proto" }

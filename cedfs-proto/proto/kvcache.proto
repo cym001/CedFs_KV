@@ -81,6 +81,7 @@ service KvMeta2Meta {
     rpc GetKvMeta(GetKvMetaRequest) returns (GetKvMetaResponse);
     rpc UpdateKvMeta(UpdateKvMetaRequest) returns (UpdateKvMetaResponse);
     rpc SearchKvBlock(SearchKvBlockRequest) returns (SearchKvBlockResponse);
+    rpc SearchKvBlockByPrompts(SearchKvBlockByPromptsRequest) returns (SearchKvBlockByPromptsResponse);
 }
 
 // 1. GetKvMeta - 获取副本列表
@@ -115,5 +116,15 @@ message SearchKvBlockRequest {
 }
 
 message SearchKvBlockResponse {
+    repeated SearchResult results = 1;
+}
+
+// 4. SearchKvBlockByPrompts - 根据prompts查找kvblock
+message SearchKvBlockByPromptsRequest {
+    repeated string model_name = 1;
+    repeated string prompts = 2;
+}
+
+message SearchKvBlockByPromptsResponse {
     repeated SearchResult results = 1;
 }

@@ -50,3 +50,5 @@ prost = "0.13"
 tonic = "0.13"
 tonic-build = "0.13"
 
+tokenizers = "0.22.1"
+

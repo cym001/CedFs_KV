@@ -176,6 +176,19 @@ pub struct SearchKvBlockResponse {
     #[prost(message, repeated, tag = "1")]
     pub results: ::prost::alloc::vec::Vec<SearchResult>,
 }
+/// 4. SearchKvBlockByPrompts - 根据prompts查找kvblock
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchKvBlockByPromptsRequest {
+    #[prost(string, repeated, tag = "1")]
+    pub model_name: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub prompts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchKvBlockByPromptsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub results: ::prost::alloc::vec::Vec<SearchResult>,
+}
 /// Generated client implementations.
 pub mod kv_meta2_data_client {
     #![allow(
@@ -480,6 +493,32 @@ pub mod kv_meta2_meta_client {
                 .insert(GrpcMethod::new("kvcache.KvMeta2Meta", "SearchKvBlock"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn search_kv_block_by_prompts(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SearchKvBlockByPromptsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchKvBlockByPromptsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/kvcache.KvMeta2Meta/SearchKvBlockByPrompts",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("kvcache.KvMeta2Meta", "SearchKvBlockByPrompts"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -750,6 +789,13 @@ pub mod kv_meta2_meta_server {
             tonic::Response<super::SearchKvBlockResponse>,
             tonic::Status,
         >;
+        async fn search_kv_block_by_prompts(
+            &self,
+            request: tonic::Request<super::SearchKvBlockByPromptsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchKvBlockByPromptsResponse>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct KvMeta2MetaServer<T> {
@@ -947,6 +993,55 @@ pub mod kv_meta2_meta_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SearchKvBlockSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/kvcache.KvMeta2Meta/SearchKvBlockByPrompts" => {
+                    #[allow(non_camel_case_types)]
+                    struct SearchKvBlockByPromptsSvc<T: KvMeta2Meta>(pub Arc<T>);
+                    impl<
+                        T: KvMeta2Meta,
+                    > tonic::server::UnaryService<super::SearchKvBlockByPromptsRequest>
+                    for SearchKvBlockByPromptsSvc<T> {
+                        type Response = super::SearchKvBlockByPromptsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SearchKvBlockByPromptsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KvMeta2Meta>::search_kv_block_by_prompts(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SearchKvBlockByPromptsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

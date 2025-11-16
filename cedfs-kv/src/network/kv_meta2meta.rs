@@ -5,13 +5,14 @@ use cedfs_proto::kvcache::{
     kv_meta2_meta_server::KvMeta2Meta,
     GetKvMetaRequest, GetKvMetaResponse,
     UpdateKvMetaRequest, UpdateKvMetaResponse, 
-    SearchKvBlockRequest, SearchKvBlockResponse, 
+    SearchKvBlockRequest, SearchKvBlockResponse,
+    SearchKvBlockByPromptsRequest, SearchKvBlockByPromptsResponse, 
 };
 
 use crate::Shared;
 use crate::operation::get_kvmeta::GetKvMetaOp;
 use crate::operation::update_kvmeta::UpdateKvMetaOp;
-use crate::operation::search_kv::SearchKvOp;
+use crate::operation::search_kv::{SearchKvOp, SearchKvByPromptsOp};
 use crate::convert::bytes2hash;
 
 pub struct KvCacheMetaService {
@@ -80,6 +81,26 @@ impl KvMeta2Meta for KvCacheMetaService{
         let resp = SearchKvOp {
             shared: self.shared.clone(),
             query_lists,
+        }.run().await;
+        
+        match resp {
+            Ok(response) => Ok(Response::new(response)),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    /// 通过prompts搜索kv块
+    async fn search_kv_block_by_prompts(
+        &self,
+        request: Request<SearchKvBlockByPromptsRequest>,
+    ) -> Result<Response<SearchKvBlockByPromptsResponse>, Status> {
+        tracing::info!("search_kv_block_by_prompts request received");
+        let _req = request.into_inner();
+        
+        let resp = SearchKvByPromptsOp {
+            shared: self.shared.clone(),
+            model_names: _req.model_name,
+            prompts: _req.prompts,
         }.run().await;
         
         match resp {

@@ -13,6 +13,7 @@ use crate::hash::{HashAlgorithm, TokenHasher};
 use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
+use crate::tokenizers::TokenizerManager;
 
 pub mod config;
 pub mod types;
@@ -22,6 +23,7 @@ pub mod convert;
 pub mod hash;
 pub mod network;
 pub mod operation;
+pub mod tokenizers;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -36,6 +38,9 @@ pub struct Shared {
 
     // 本地kv块元数据
     //pub local_kvcache_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
+
+    // 分词器
+    pub tokenizer_manager:Arc<TokenizerManager>,
 
     // 本地KV块索引
     pub local_kv_index: Arc<RwLock<HashSet<[u8; 32]>>>,
@@ -103,10 +108,16 @@ impl KVServer {
 
                 let hasher = TokenHasher::new(algorithm, config.unfull_chunk);
 
+                // 初始化TokenizerManager并预加载所有配置的tokenizer
+                let tokenizer_manager = Arc::new(
+                    TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await
+                );
+                
                 let shared = Shared {
                     data_server_collect: data_servers,
                     meta_server_collect: meta_servers,
                     hasher: Arc::new(hasher),
+                    tokenizer_manager,
                     local_kv_index: Arc::new(RwLock::new(HashSet::new())),
                     global_kvcache_table: Arc::new(DashMap::new()),
                     update_kvmeta_table: Arc::new(DashMap::new()),

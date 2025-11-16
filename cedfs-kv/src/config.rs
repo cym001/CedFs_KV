@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use derive_builder::Builder;
 
@@ -41,6 +42,9 @@ pub struct Config {
     // 采用的hash算法
     pub hash_algorithm: String,
 
+    // model_name到tokenizer_path的映射
+    pub model_tokenizer_map: HashMap<String, String>,
+
 }
 
 impl Config {
@@ -80,6 +84,9 @@ impl Config {
 
         let hash_algorithm: String = config.get("hash_algorithm")
             .map_err(|e| ConfigError::MissingField(format!("hash_algorithm: {}", e)))?;
+
+        let model_tokenizer_map: HashMap<String, String> = config.get("model_tokenizer_map")
+            .map_err(|e| ConfigError::MissingField(format!("model_tokenizer_map: {}", e)))?;
         
         Ok(ConfigBuilder::default()
             .loaded_config(config)
@@ -94,6 +101,7 @@ impl Config {
             .block_size(block_size)
             .unfull_chunk(unfull_chunk)
             .hash_algorithm(hash_algorithm)
+            .model_tokenizer_map(model_tokenizer_map)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }
