@@ -58,6 +58,7 @@ impl From<cedfs_proto::kvcache::DataServer> for DataServer {
             http_port: proto.http_port as u16,  
             rpc_port: proto.rpc_port as u16,
             model_name: proto.model_name,
+            url: proto.url,
         }
     }
 }   
@@ -69,6 +70,7 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
             http_port: internal.http_port as u32,
             rpc_port: internal.rpc_port as u32,
             model_name: internal.model_name,
+            url: internal.url,
         }
     }
 }

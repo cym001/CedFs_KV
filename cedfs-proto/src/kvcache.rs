@@ -16,6 +16,9 @@ pub struct DataServer {
     /// 模型名称
     #[prost(string, tag = "5")]
     pub model_name: ::prost::alloc::string::String,
+    /// 实例url
+    #[prost(string, tag = "6")]
+    pub url: ::prost::alloc::string::String,
 }
 /// 元数据服务器信息
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -69,8 +72,8 @@ pub struct UpdateKvOp {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TokenLists {
     /// token ids
-    #[prost(int64, repeated, tag = "1")]
-    pub tokens: ::prost::alloc::vec::Vec<i64>,
+    #[prost(uint32, repeated, tag = "1")]
+    pub tokens: ::prost::alloc::vec::Vec<u32>,
 }
 /// kvcache位置信息
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -96,8 +99,8 @@ pub struct SearchResult {
 pub struct UploadKvMetaRequest {
     #[prost(uint32, tag = "1")]
     pub server_id: u32,
-    #[prost(int64, repeated, tag = "2")]
-    pub tokens: ::prost::alloc::vec::Vec<i64>,
+    #[prost(uint32, repeated, tag = "2")]
+    pub tokens: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct UploadKvMetaResponse {

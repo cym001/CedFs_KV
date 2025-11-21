@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use dashmap::DashMap;
-use tokenizers::{Tokenizer, Result};
+use tokenizers::{Tokenizer,Result};
 use tokio::task;
 use tokio::time::timeout;
 
@@ -81,7 +81,7 @@ impl TokenizerManager{
 
             // spawn_blocking: because loading Tokenizer is CPU & IO heavy
             let load_result = task::spawn_blocking(move || {
-                Tokenizer::from_file(&tokenizer_path)
+                load_tokenizer_core(&tokenizer_path)
             })
             .await;
 
@@ -103,7 +103,7 @@ impl TokenizerManager{
                         model_name,
                         e
                     );
-                    self.load_from_pretrained(model_name).await
+                    self.load_from_http(model_name).await
                 }
                 Err(e) => {
                     // spawn_blocking失败，尝试从pretrained加载
@@ -112,20 +112,20 @@ impl TokenizerManager{
                         model_name,
                         e
                     );
-                    self.load_from_pretrained(model_name).await
+                    self.load_from_http(model_name).await
                 }
             }
         } else {
-            // 如果配置中不存在，调用load_from_pretrained
+            // 如果配置中不存在，调用load_from_http
             tracing::info!(
                 "No tokenizer path configured for '{}', loading from pretrained",
                 model_name
             );
-            self.load_from_pretrained(model_name).await
+            self.load_from_http(model_name).await
         }
     }
 
-    pub async fn load_from_pretrained(
+    pub async fn load_from_http(
         &self,
         model_name: &str,
     ) -> Result<()> {
@@ -190,13 +190,13 @@ impl TokenizerManager{
             .get(model_name)
             .ok_or_else(|| {
                 tokenizers::Error::from(format!(
-                    "Tokenizer '{}' not found. Please load it first using load_tokenizer() or load_from_pretrained()",
+                    "Tokenizer '{}' not found. Please load it first using load_tokenizer() or load_from_http()",
                     model_name
                 ))
             })?;
 
         // Encode the text
-        let encoding = tokenizer.encode(prompts, false)?;
+        let encoding = tokenizer.encode(prompts, true)?;
         
         // Get token IDs 
         let tokens: Vec<u32> = encoding.get_ids().to_vec();
@@ -218,7 +218,7 @@ impl TokenizerManager{
             .get(model_name)
             .ok_or_else(|| {
                 tokenizers::Error::from(format!(
-                    "Tokenizer '{}' not found. Load it first via load_from_pretrained()",
+                    "Tokenizer '{}' not found. Load it first via load_from_http()",
                     model_name
                 ))
             })?
@@ -227,7 +227,7 @@ impl TokenizerManager{
         let prompts = prompts.to_string();
     
         let tokens = tokio::task::spawn_blocking(move || {
-            let encoding = tokenizer.encode(prompts, false)?;
+            let encoding = tokenizer.encode(prompts, true)?;
             // get_ids() -> &[u32] 需要 clone 成 Vec<u32>
             Ok::<Vec<u32>, tokenizers::Error>(encoding.get_ids().to_vec())
         })
@@ -237,4 +237,27 @@ impl TokenizerManager{
         Ok(tokens)
     }
 
+}
+
+/// Try loading tokenizer in the same order as vLLM/HF
+fn load_tokenizer_core(model_path: &str) -> Result<Tokenizer> {
+    // 1. tokenizer.json (full fast tokenizer)
+    let tok_json = format!("{}/tokenizer.json", model_path);
+    if Path::new(&tok_json).exists() {
+        return Tokenizer::from_file(tok_json);
+    }
+
+    // 2. sentencepiece
+    let spm = format!("{}/tokenizer.model", model_path);
+    if Path::new(&spm).exists() {
+        return Tokenizer::from_file(spm);
+    }
+
+    // 3. vocab.json + merges.txt
+    let vocab = Path::new(model_path).join("vocab.json");
+    if vocab.exists() {
+        return Tokenizer::from_file(vocab);
+    }
+
+    Err("No valid tokenizer files found".into())
 }

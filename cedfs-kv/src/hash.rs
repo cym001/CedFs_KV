@@ -96,7 +96,7 @@ impl TokenHasher {
         match algorithm {
             HashAlgorithm::Builtin => {
                 let mut hasher = DefaultHasher::new();
-                None::<i64>.hash(&mut hasher);
+                None::<u32>.hash(&mut hasher);
                 HashValue::U64(hasher.finish())
             }
             HashAlgorithm::Sha256 | HashAlgorithm::Sha256Cbor => {
@@ -112,7 +112,7 @@ impl TokenHasher {
         self.none_hash.clone()
     }
 
-    /// 对 token 序列进行哈希 (Vec<i64> 输入)
+    /// 对 token 序列进行哈希 (Vec<u32> 输入)
     /// 
     /// # 参数
     /// - `tokens`: token 序列
@@ -120,7 +120,7 @@ impl TokenHasher {
     /// - `extra_keys`: 可选的额外键（用于多模态输入等）
     pub fn hash_tokens(
         &self,
-        tokens: &[i64],
+        tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
@@ -140,7 +140,7 @@ impl TokenHasher {
     /// 使用 Rust 内置的哈希函数
     fn builtin_hash(
         &self,
-        tokens: &[i64],
+        tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
@@ -156,7 +156,7 @@ impl TokenHasher {
     /// 使用 SHA256 哈希
     fn sha256_hash(
         &self,
-        tokens: &[i64],
+        tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
@@ -186,7 +186,7 @@ impl TokenHasher {
     /// 使用 SHA256 + CBOR 哈希（简化版本）
     fn sha256_cbor_hash(
         &self,
-        tokens: &[i64],
+        tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
@@ -229,7 +229,7 @@ impl TokenHasher {
     /// 包含每个块计算后的哈希值的 Vec
     pub fn hash_tokens_with_blocks_all(
         &self,
-        tokens: &[i64],
+        tokens: &[u32],
         block_size: usize,
     ) -> Vec<HashValue> {
         if block_size == 0 {
@@ -243,7 +243,7 @@ impl TokenHasher {
         let mut results = Vec::new();
         let mut current_hash = self.get_init_hash();
         
-        let chunks: Vec<&[i64]> = tokens.chunks(block_size).collect();
+        let chunks: Vec<&[u32]> = tokens.chunks(block_size).collect();
         let total_chunks = chunks.len();
         
         for (idx, chunk) in chunks.into_iter().enumerate() {
@@ -267,7 +267,7 @@ impl TokenHasher {
     /// 对每个 token chunk 进行增量哈希，返回每个步骤的哈希值
     pub fn prefix_hash<'a>(
         &'a self,
-        token_chunks: impl Iterator<Item = &'a [i64]> + 'a,
+        token_chunks: impl Iterator<Item = &'a [u32]> + 'a,
     ) -> impl Iterator<Item = HashValue> + 'a {
         let mut prefix_hash = self.get_init_hash();
         
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn test_hash_tokens_with_blocks_all() {
         let hasher = TokenHasher::new(HashAlgorithm::Sha256, false);
-        let tokens: Vec<i64> = vec![1, 2, 3, 4, 5, 6];
+        let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
         
         let hashes = hasher.hash_tokens_with_blocks_all(&tokens, 2);
         
@@ -296,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_hash_i64() {
+    fn test_builtin_hash_u32() {
         let hasher = TokenHasher::new(HashAlgorithm::Builtin, false);
-        let tokens: Vec<i64> = vec![1, 2, 3];
+        let tokens: Vec<u32> = vec![1, 2, 3];
         
         let hash = hasher.hash_tokens(&tokens, None, None);
         assert!(matches!(hash, HashValue::U64(_)));

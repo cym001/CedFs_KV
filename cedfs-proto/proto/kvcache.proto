@@ -9,6 +9,7 @@ message DataServer {
     uint32 http_port = 3;               // http端口
     uint32 rpc_port = 4;                // rpc端口
     string model_name = 5;              // 模型名称
+    string url = 6;                     // 实例url
 }
 
 // 元数据服务器信息
@@ -39,7 +40,7 @@ message UpdateKvOp {
 
 // 分块的token信息
 message Token_lists {
-    repeated int64 tokens = 1;    // token ids
+    repeated uint32 tokens = 1;    // token ids
 }
 
 // kvcache位置信息
@@ -61,7 +62,7 @@ service KvMeta2Data {
 // 1.数据服务器向元数据服务器上传本地新增kvcache元数据
 message UploadKvMetaRequest {
     uint32 server_id = 1;
-    repeated int64 tokens = 2; 
+    repeated uint32 tokens = 2; 
 }
 
 message UploadKvMetaResponse {

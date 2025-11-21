@@ -51,6 +51,9 @@ pub struct DataServer {
     /// 实例部署的模型名称
     pub model_name: String,
 
+    /// 实例服务URL
+    pub url: String,
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +103,7 @@ impl Default for DataServer {
             http_port: 0,
             rpc_port: 0,    
             model_name: "default_model_name".to_string(),
+            url: "default_url".to_string(),
         }
     }
 }

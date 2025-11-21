@@ -4,7 +4,7 @@ use crate::Shared;
 
 pub struct UploadKvMetaOp {
     pub server_id: u32,
-    pub tokens: Vec<i64>,
+    pub tokens: Vec<u32>,
     pub shared: Shared,
 }
 

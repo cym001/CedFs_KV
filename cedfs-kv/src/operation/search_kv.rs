@@ -4,7 +4,7 @@ use crate::Shared;
 
 pub struct SearchKvOp {
     pub shared: Shared,
-    pub query_lists: Vec<Vec<i64>>,
+    pub query_lists: Vec<Vec<u32>>,
 }
 
 impl SearchKvOp {
@@ -23,7 +23,6 @@ impl SearchKvOp {
                 continue;
             }
 
-            // 将 Vec<i64> 转换为 Vec<[u8; 32]>
             let token_hashes = self
                 .shared
                 .hasher
@@ -82,22 +81,27 @@ impl SearchKvByPromptsOp {
             // 对每个model_name，生成token并进行匹配
             for model_name in self.model_names.iter() {
                 // 使用tokenizer对prompt进行编码
-                let tokens = match self.shared.tokenizer_manager.encode_async(model_name, prompt).await {
-                    Ok(tokens) => tokens,
+                let token_list = match self.shared.tokenizer_manager.encode_async(model_name, prompt).await {
+                    Ok(token_list) => token_list,
                     Err(e) => {
                         tracing::warn!("Failed to encode prompt with model '{}': {}", model_name, e);
                         continue; // 跳过这个model_name
                     }
                 };
 
-                // 将 Vec<u32> 转换为 Vec<i64>
-                let token_list: Vec<i64> = tokens.iter().map(|&t| t as i64).collect();
+                // 输出前50个token用于调试
+                // let preview_tokens: Vec<u32> = token_list.iter().take(50).copied().collect();
+                // tracing::info!(
+                //     "Encoded prompt with model '{}': {} tokens total, first 50: {:?}",
+                //     model_name,
+                //     token_list.len(),
+                //     preview_tokens
+                // );
 
                 if token_list.is_empty() {
                     continue;
                 }
 
-                // 将 Vec<i64> 转换为 Vec<[u8; 32]>
                 let token_hashes = self
                     .shared
                     .hasher
@@ -116,10 +120,9 @@ impl SearchKvByPromptsOp {
                     if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
                         // 只添加model_name匹配的结果
                         if &data_server.model_name == model_name {
-                            let url = format!("{}:{}", data_server.ip, data_server.http_port);
                             let kv_block_pos = KvBlockPos {
                                 model_name: data_server.model_name.clone(),
-                                url,
+                                url: data_server.url.clone(),
                                 len: matched_length,
                             };
                             search_result.block_pos.push(kv_block_pos);

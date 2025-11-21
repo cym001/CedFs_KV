@@ -72,8 +72,8 @@ impl KvMeta2Meta for KvCacheMetaService{
         tracing::info!("search_kv_block request received");
         let _req = request.into_inner();
         
-        // 将 proto 的 Token_lists 转换为 Vec<Vec<Vec<i64>>>
-        let query_lists: Vec<Vec<i64>> = _req.query_lists
+        // 将 proto 的 Token_lists 转换为 Vec<Vec<Vec<u32>>>
+        let query_lists: Vec<Vec<u32>> = _req.query_lists
             .into_iter()
             .map(|token_list| {token_list.tokens})
             .collect();
