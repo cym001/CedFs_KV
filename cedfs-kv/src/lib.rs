@@ -24,6 +24,7 @@ pub mod hash;
 pub mod network;
 pub mod operation;
 pub mod tokenizers;
+pub mod transfer;
 
 #[derive(Clone)]
 pub struct Shared {

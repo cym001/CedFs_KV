@@ -52,3 +52,5 @@ tonic-build = "0.13"
 
 tokenizers = "0.22.1"
 
+warp = "0.3"
+bytes = "1"

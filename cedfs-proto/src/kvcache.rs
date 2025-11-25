@@ -118,6 +118,19 @@ pub struct RegisterInstanceResponse {
     #[prost(bool, tag = "1")]
     pub success: bool,
 }
+/// 3.数据服务器向元数据服务器上传本地删除kvcache元数据
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RemoveKvMetaRequest {
+    #[prost(int32, tag = "1")]
+    pub remove_nums: i32,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub tokens_hash: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RemoveKvMetaResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+}
 /// 1. GetKvMeta - 获取副本列表
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetKvMetaRequest {
@@ -329,6 +342,30 @@ pub mod kv_meta2_data_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("kvcache.KvMeta2Data", "RegisterInstance"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn remove_kv_meta(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoveKvMetaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveKvMetaResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/kvcache.KvMeta2Data/RemoveKvMeta",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("kvcache.KvMeta2Data", "RemoveKvMeta"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -551,6 +588,13 @@ pub mod kv_meta2_data_server {
             tonic::Response<super::RegisterInstanceResponse>,
             tonic::Status,
         >;
+        async fn remove_kv_meta(
+            &self,
+            request: tonic::Request<super::RemoveKvMetaRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveKvMetaResponse>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct KvMeta2DataServer<T> {
@@ -703,6 +747,51 @@ pub mod kv_meta2_data_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RegisterInstanceSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/kvcache.KvMeta2Data/RemoveKvMeta" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoveKvMetaSvc<T: KvMeta2Data>(pub Arc<T>);
+                    impl<
+                        T: KvMeta2Data,
+                    > tonic::server::UnaryService<super::RemoveKvMetaRequest>
+                    for RemoveKvMetaSvc<T> {
+                        type Response = super::RemoveKvMetaResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoveKvMetaRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KvMeta2Data>::remove_kv_meta(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoveKvMetaSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

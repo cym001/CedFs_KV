@@ -4,9 +4,11 @@ use cedfs_proto::kvcache::kv_meta2_data_server::{KvMeta2Data};
 use cedfs_proto::kvcache::{
     UploadKvMetaRequest, UploadKvMetaResponse,
     RegisterInstanceRequest, RegisterInstanceResponse,
+    RemoveKvMetaRequest, RemoveKvMetaResponse,
 };
 use crate::Shared;
-use crate::operation::{upload_kvmeta::UploadKvMetaOp};
+use crate::operation::{upload_kvmeta::UploadKvMetaOp,remove_kvmeta::RemoveKvMetaOp};
+
 
 pub struct KvCacheDataService {
     pub(crate) shared: Shared,
@@ -46,6 +48,24 @@ impl KvMeta2Data for KvCacheDataService{
         let resp = _op.run().await;
         match resp {
             Ok(_) => Ok(Response::new(RegisterInstanceResponse {success: true,})),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    ///删除KV元数据
+    async fn remove_kv_meta(
+        &self,
+        request: Request<RemoveKvMetaRequest>,
+    ) -> Result<Response<RemoveKvMetaResponse>, Status> {
+        tracing::info!("upload_kv_meta request received");
+        let req = request.into_inner();
+        let resp = RemoveKvMetaOp {
+            remove_nums: req.remove_nums,
+            tokens_hash: req.tokens_hash,
+            shared: self.shared.clone(),
+        }.run().await;
+        match resp {
+            Ok(_) => Ok(Response::new(RemoveKvMetaResponse {success: true,})),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
