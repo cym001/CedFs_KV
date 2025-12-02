@@ -2,10 +2,19 @@ use reqwest;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct MoveRequest {
-    old_position: Vec<String>,
-    new_position: Vec<String>,
-    tokens: Vec<i64>,
+pub struct TransferRequest {
+    hashes: Vec<i64>,
+    old_position: (String, String),
+    offsets: Vec<i64>,
+    peer_ip: String,
+    peer_init_port: i32,
+    peer_lookup_port: i32,
+    do_copy: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferResponse {
+    pub num_tokens: i32,
 }
 
 pub struct MoveKVReplicaOp {
@@ -22,20 +31,28 @@ impl MoveKVReplicaOp {
         }
     }
 
-    // 发送 move 请求
-    pub async fn send_move_request(
+    // 发送 transfer 请求
+    pub async fn send_transfer_request(
         &self,
-        old_position: Vec<String>,
-        new_position: Vec<String>,
-        tokens: Vec<i64>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
-        let request_body = MoveRequest {
+        hashes: Vec<i64>,
+        old_position: (String, String),
+        offsets: Vec<i64>,
+        peer_ip: String,
+        peer_init_port: i32,
+        peer_lookup_port: i32,
+        do_copy: bool,
+    ) -> Result<TransferResponse, reqwest::Error> {
+        let request_body = TransferRequest {
+            hashes,
             old_position,
-            new_position,
-            tokens,
+            offsets,
+            peer_ip,
+            peer_init_port,
+            peer_lookup_port,
+            do_copy,
         };
 
-        let url = format!("{}/move", self.base_url);
+        let url = format!("{}/Transfer", self.base_url);
         
         let response = self.client
             .post(&url)
@@ -44,11 +61,7 @@ impl MoveKVReplicaOp {
             .send()
             .await?;
 
-        Ok(response)
-    }
-
-    // 获取响应文本
-    pub async fn get_response_text(response: reqwest::Response) -> Result<String, reqwest::Error> {
-        response.text().await
+        let transfer_response = response.json::<TransferResponse>().await?;
+        Ok(transfer_response)
     }
 }

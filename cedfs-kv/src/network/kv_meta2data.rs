@@ -26,6 +26,7 @@ impl KvMeta2Data for KvCacheDataService{
         let req = request.into_inner();
         let resp = UploadKvMetaOp {
             server_id: req.server_id,
+            offset: req.offset,
             tokens: req.tokens,
             shared: self.shared.clone(),
         }.run().await;

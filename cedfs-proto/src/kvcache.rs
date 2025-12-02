@@ -12,12 +12,15 @@ pub struct DataServer {
     pub http_port: u32,
     /// rpc端口
     #[prost(uint32, tag = "4")]
-    pub rpc_port: u32,
+    pub init_port: u32,
+    /// rpc端口
+    #[prost(uint32, tag = "5")]
+    pub lookup_port: u32,
     /// 模型名称
-    #[prost(string, tag = "5")]
+    #[prost(string, tag = "6")]
     pub model_name: ::prost::alloc::string::String,
     /// 实例url
-    #[prost(string, tag = "6")]
+    #[prost(string, tag = "7")]
     pub url: ::prost::alloc::string::String,
 }
 /// 元数据服务器信息
@@ -38,11 +41,14 @@ pub struct KvBlockMeta {
     /// 块哈希：固定长度 32 字节
     #[prost(bytes = "vec", tag = "1")]
     pub token_hash: ::prost::alloc::vec::Vec<u8>,
+    /// token数量
+    #[prost(uint32, tag = "2")]
+    pub offset: u32,
     /// 下一个 token 的 32 字节哈希列表
-    #[prost(bytes = "vec", repeated, tag = "2")]
+    #[prost(bytes = "vec", repeated, tag = "3")]
     pub next_tokens: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     /// 副本信息
-    #[prost(uint32, repeated, tag = "3")]
+    #[prost(uint32, repeated, tag = "4")]
     pub server_id: ::prost::alloc::vec::Vec<u32>,
 }
 /// 本地单个 block 的引用计数
@@ -99,7 +105,9 @@ pub struct SearchResult {
 pub struct UploadKvMetaRequest {
     #[prost(uint32, tag = "1")]
     pub server_id: u32,
-    #[prost(uint32, repeated, tag = "2")]
+    #[prost(uint32, tag = "2")]
+    pub offset: u32,
+    #[prost(uint32, repeated, tag = "3")]
     pub tokens: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]

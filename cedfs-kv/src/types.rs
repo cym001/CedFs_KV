@@ -12,7 +12,10 @@ use serde::{Serialize, Deserialize};
 pub struct KvBlockMeta {
              
     // 块哈希值
-    pub token_hash: [u8; 32],            
+    pub token_hash: [u8; 32],        
+
+    // token数量
+    pub offset: u32,
 
     // token ids
     pub next_tokens: Vec<[u8; 32]>,                                              
@@ -45,8 +48,9 @@ pub struct DataServer {
     /// http端口
     pub http_port: u16,
 
-    /// rpc端口
-    pub rpc_port: u16,
+    /// zmq端口
+    pub init_port: u16,
+    pub lookup_port: u16,
 
     /// 实例部署的模型名称
     pub model_name: String,
@@ -101,7 +105,8 @@ impl Default for DataServer {
             ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
             // 默认端口0
             http_port: 0,
-            rpc_port: 0,    
+            init_port: 0,
+            lookup_port: 0,    
             model_name: "default_model_name".to_string(),
             url: "default_url".to_string(),
         }

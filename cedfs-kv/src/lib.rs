@@ -532,7 +532,7 @@ impl Shared {
     /// # 返回
     /// - `true`: 成功创建或更新
     /// - `false`: 失败
-    pub fn create_new_kvblock(&self, server_id: u32, token_hash: Vec<[u8; 32]>) -> bool {
+    pub fn create_new_kvblock(&self, server_id: u32, offset: u32, token_hash: Vec<[u8; 32]>) -> bool {
         if token_hash.is_empty() {
             return false;
         }
@@ -590,6 +590,7 @@ impl Shared {
                 // 不存在相同hash的块，创建新的KvBlockMeta
                 let new_meta = KvBlockMeta {
                     token_hash: current_hash,
+                    offset: offset,
                     next_tokens: next_tokens.clone(),
                     server_id: vec![server_id],
                 };

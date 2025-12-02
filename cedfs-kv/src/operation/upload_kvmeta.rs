@@ -4,6 +4,7 @@ use crate::Shared;
 
 pub struct UploadKvMetaOp {
     pub server_id: u32,
+    pub offset: u32,
     pub tokens: Vec<u32>,
     pub shared: Shared,
 }
@@ -16,7 +17,7 @@ impl UploadKvMetaOp {
             .hash_tokens_with_blocks_all(&self.tokens, self.shared.config.block_size)
             .iter().map(|x|x.to_u256()).collect();
 
-        self.shared.create_new_kvblock(self.server_id, tokens_hash.clone());
+        self.shared.create_new_kvblock(self.server_id, self.offset, tokens_hash.clone());
         self.shared.ref_count.batch_increment_local_incremental_count(&tokens_hash, 1);
 
         Ok(())

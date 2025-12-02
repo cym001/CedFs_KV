@@ -8,7 +8,7 @@ use crate::types::{DataServer, MetaServer, UpdateKvOp};
 use crate::Shared;
 use crate::operation::popularity_score::PopularityScoreOp;
 use crate::operation::move_kvreplica::MoveKVReplicaOp;
-use crate::convert::{hash2bytes, bytes2hash};
+use crate::convert::{hash2bytes, bytes2hash, hash_to_i64};
 
 pub struct KvCacheClient {
     pub shared: Shared,
@@ -207,8 +207,7 @@ impl KvCacheClient {
                 // 根据IP和端口查找并更新对应的服务器
                 if let Some(pos) = data_collect.iter().position(|s| 
                     s.ip == updated_server.ip && 
-                    s.http_port == updated_server.http_port &&
-                    s.rpc_port == updated_server.rpc_port
+                    s.http_port == updated_server.http_port
                 ) {
                     data_collect[pos] = updated_server;
                 }
@@ -270,41 +269,100 @@ impl KvCacheClient {
 
     /// kv cache 根据热度迁移
     pub async fn move_kv_replica(&self) -> anyhow::Result<()> {
-        // let data_servers = PopularityScoreOp {
-        //     shared: self.shared.clone(),
-        // }.run().await;
-        // let new_position = self.shared.config.local_data_server.clone().instance;
-        // for (token_hash,server, tokens) in data_servers {
-        //     if server.instance != new_position {
-        //         // 迁移逻辑
-        //         let url = format!("http://{}:{}", server.ip, server.http_port);
-        //         let client = MoveKVReplicaOp::new(&url);
-        //         match client.send_move_request(server.instance.clone(),new_position.clone(),tokens).await{
-        //             Ok(response) => {
-        //                 match response.text().await {
-        //                     Ok(_) => {
-        //                         tracing::info!("Migrating data from server {:?} to local server {:?}", server, new_position);
-        //                         let mut meta = self.shared.get_local_kvcache(token_hash).unwrap().clone();
-        //                         // 更新server_socket信息
-        //                         //meta.server_socket.retain(|s| !(s.ip == server.ip && s.http_port == server.http_port && s.rpc_port == server.rpc_port));
-        //                         meta.server_id.push(self.shared.config.local_data_server.id);
-        //                         self.shared.insert_local_kvcache(meta);
-        //                         let update_op = UpdateKvOp{
-        //                             token_hash,
-        //                             operation: 1, //添加副本操作
-        //                             server_id: self.shared.config.local_data_server.id,
-        //                         };
-        //                         self.shared.update_kvop_table.insert(token_hash, update_op);
-
-        //                     },
-        //                     Err(e) => tracing::error!("Failed to read response body: {}", e),
-        //                 }
-        //             }
-        //             Err(e) => tracing::error!("Failed to send move request: {}", e),
-        //         }
-                
-        //     }
-        // }
+        let transfer_items = PopularityScoreOp {
+            shared: self.shared.clone(),
+        }.run().await;
+        
+        // 按源服务器分组数据
+        use std::collections::HashMap;
+        let mut server_groups: HashMap<u32, Vec<([u8; 32], u32, DataServer)>> = HashMap::new();
+        
+        for (token_hash, offset, source_server, target_server) in transfer_items {
+            server_groups
+                .entry(source_server.id)
+                .or_insert_with(Vec::new)
+                .push((token_hash, offset, target_server));
+        }
+        
+        // 对每个源服务器发起迁移请求
+        for (source_server_id, items) in server_groups {
+            // 查找源服务器信息
+            let source_server = {
+                let data_collect = self.shared.data_server_collect.read().await;
+                data_collect.iter().find(|s| s.id == source_server_id).cloned()
+            };
+            
+            if let Some(source_server) = source_server {
+                // 获取第一个目标服务器（所有items应该有相同的目标服务器）
+                if let Some((_, _, target_server)) = items.first() {
+                    // 准备请求参数
+                    let hashes: Vec<i64> = items.iter().map(|(hash, _, _)| hash_to_i64(*hash)).collect();
+                    let offsets: Vec<i64> = items.iter().map(|(_, offset, _)| *offset as i64).collect();
+                    let old_position = (source_server.ip.to_string(), source_server.http_port.to_string());
+                    
+                    // 目标服务器的信息（接收方）
+                    let peer_ip = target_server.ip.to_string();
+                    let peer_init_port = self.shared.config.transfer_meta_port as i32;
+                    let peer_lookup_port = self.shared.config.transfer_meta_port as i32;
+                    
+                    // 发送迁移请求到源服务器
+                    let url = format!("http://{}:{}", source_server.ip, source_server.http_port);
+                    let client = MoveKVReplicaOp::new(&url);
+                    
+                    match client.send_transfer_request(
+                        hashes.clone(),
+                        old_position,
+                        offsets,
+                        peer_ip.clone(),
+                        peer_init_port,
+                        peer_lookup_port,
+                        true, // do_copy = true，表示复制而非移动
+                    ).await {
+                        Ok(response) => {
+                            tracing::info!(
+                                "Successfully transferred {} tokens from server {} ({}:{}) to server {} ({}), num_tokens: {}",
+                                items.len(),
+                                source_server.id,
+                                source_server.ip,
+                                source_server.http_port,
+                                target_server.id,
+                                target_server.ip,
+                                response.num_tokens
+                            );
+                            
+                            // 更新本地元数据（如果目标服务器是本地）
+                            let local_meta = &self.shared.config.local_meta_server;
+                            if target_server.ip == local_meta.ip 
+                                && target_server.http_port == self.shared.config.transfer_meta_port as u16 {
+                                for (token_hash, _, _) in &items {
+                                    // 将token_hash添加到本地索引
+                                    self.shared.insert_local_kvcache(*token_hash).await;
+                                    
+                                    // 记录更新操作
+                                    let update_op = UpdateKvOp {
+                                        token_hash: *token_hash,
+                                        operation: 1, // 添加副本操作
+                                        server_id: target_server.id,
+                                    };
+                                    self.shared.update_kvop_table.insert(*token_hash, update_op);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to transfer from server {} ({}:{}) to server {} ({}): {:?}",
+                                source_server.id,
+                                source_server.ip,
+                                source_server.http_port,
+                                target_server.id,
+                                target_server.ip,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
