@@ -1,14 +1,16 @@
 use tokio::time::{interval, Duration};
 
 use cedfs_proto::kvcache::kv_meta2_meta_client::KvMeta2MetaClient;
-use cedfs_proto::kvcache::{UpdateKvMetaRequest, UpdateKvMetaResponse, GetKvMetaRequest, GetKvMetaResponse};
+use cedfs_proto::kvcache::{
+    GetKvMetaRequest, GetKvMetaResponse, UpdateKvMetaRequest, UpdateKvMetaResponse,
+};
 use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
 
+use crate::convert::{bytes2hash, hash2bytes};
+use crate::operation::move_kvreplica::MoveKVReplicaOp;
+use crate::operation::popularity_score::PopularityScoreOp;
 use crate::types::{DataServer, MetaServer, UpdateKvOp};
 use crate::Shared;
-use crate::operation::popularity_score::PopularityScoreOp;
-use crate::operation::move_kvreplica::MoveKVReplicaOp;
-use crate::convert::{hash2bytes, bytes2hash, hash_to_i64};
 
 pub struct KvCacheClient {
     pub shared: Shared,
@@ -18,11 +20,11 @@ impl KvCacheClient {
     pub async fn launch(&self) -> anyhow::Result<()> {
         let sync_interval = self.shared.config.sync_interval;
         let shared = self.shared.clone();
-        
+
         // 启动后台任务进行定期同步
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(sync_interval));
-            
+
             loop {
                 ticker.tick().await;
                 //tracing::info!("interval metadata sync start");
@@ -31,40 +33,43 @@ impl KvCacheClient {
                 }
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// 执行一次元数据同步
     async fn sync_metadata(shared: &Shared) -> anyhow::Result<()> {
         // 获取当前时间戳
         let update_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
-        
+
         // 克隆数据并清空原有数据
         let update_meta = {
-            let meta_snapshot: Vec<ProtoKvBlockMeta> = shared.update_kvmeta_table
+            let meta_snapshot: Vec<ProtoKvBlockMeta> = shared
+                .update_kvmeta_table
                 .iter()
                 .map(|entry| entry.value().clone().into())
                 .collect();
-            
+
             shared.update_kvmeta_table.clear();
             meta_snapshot
         };
 
         let update_kvop = {
-            let op_snapshot: Vec<cedfs_proto::kvcache::UpdateKvOp> = shared.update_kvop_table
+            let op_snapshot: Vec<cedfs_proto::kvcache::UpdateKvOp> = shared
+                .update_kvop_table
                 .iter()
                 .map(|entry| entry.value().clone().into())
                 .collect();
-            
+
             shared.update_kvop_table.clear();
             op_snapshot
         };
-        
+
         let local_counts = {
-            let counts_snapshot: Vec<LocalBlockCount> = shared.ref_count
+            let counts_snapshot: Vec<LocalBlockCount> = shared
+                .ref_count
                 .local_incremental_count
                 .iter()
                 .map(|entry| LocalBlockCount {
@@ -72,29 +77,29 @@ impl KvCacheClient {
                     count: *entry.value(),
                 })
                 .collect();
-            
+
             shared.ref_count.clear_and_consolidate_incremental_counts();
             counts_snapshot
         };
-        
+
         // 如果没有数据需要同步，直接返回
         if update_meta.is_empty() && local_counts.is_empty() {
             return Ok(());
         }
-        
+
         let req = UpdateKvMetaRequest {
             meta: update_meta,
             local_counts,
             update_op: update_kvop,
             update_time,
         };
-        
+
         // 获取元数据服务器列表的读锁
         let meta_servers = {
             let servers = shared.meta_server_collect.read().await;
             servers.clone()
         };
-        
+
         let mut tasks = Vec::new();
 
         // 只对layer为0,1,2的服务器进行元数据同步
@@ -103,48 +108,55 @@ impl KvCacheClient {
             if meta_server.layer >= 3 {
                 continue;
             }
-            if meta_server.ip == shared.config.local_meta_server.ip && meta_server.port == shared.config.local_meta_server.port {
+            if meta_server.ip == shared.config.local_meta_server.ip
+                && meta_server.port == shared.config.local_meta_server.port
+            {
                 continue;
             }
-            
+
             let addr = format!("http://{}:{}", meta_server.ip, meta_server.port);
             let req_clone = req.clone();
             let shared_clone = shared.clone();
-            
+
             let task = tokio::spawn(async move {
                 match KvMeta2MetaClient::connect(addr.clone()).await {
                     Ok(mut client) => {
                         match client.update_kv_meta(req_clone).await {
                             Ok(response) => {
                                 let resp: UpdateKvMetaResponse = response.into_inner();
-                                
+
                                 // 更新本地的MetaServerCollect信息
                                 Self::update_server_status(
                                     &shared_clone,
                                     resp.meta_server.into_iter().map(|d| d.into()).collect(),
                                     resp.data_server.into_iter().map(|d| d.into()).collect(),
-                                ).await;
-                                
+                                )
+                                .await;
+
                                 // 写入日志：与*元数据服务器同步成功
                                 tracing::info!("Successfully synced metadata with {}.", addr);
                                 Ok(())
-                            }
+                            },
                             // RPC调用失败，将该元数据服务器的layer标记为4
                             Err(e) => {
                                 Self::mark_meta_server_unavailable(&shared_clone, idx, 4).await;
                                 tracing::error!("Failed to sync metadata with {}: {:?}", addr, e);
-                                Err(anyhow::anyhow!("Failed to update meta on {}: {:?}", addr, e))
-                            }
+                                Err(anyhow::anyhow!(
+                                    "Failed to update meta on {}: {:?}",
+                                    addr,
+                                    e
+                                ))
+                            },
                         }
-                    }
+                    },
                     // 连接失败，将该元数据服务器的layer标记为5
                     Err(e) => {
                         Self::mark_meta_server_unavailable(&shared_clone, idx, 5).await;
                         Err(anyhow::anyhow!("Failed to connect to {}: {:?}", addr, e))
-                    }
+                    },
                 }
             });
-            
+
             tasks.push(task);
         }
 
@@ -153,19 +165,19 @@ impl KvCacheClient {
             match task.await {
                 Ok(Ok(_)) => {
                     // 成功
-                }
+                },
                 Ok(Err(e)) => {
                     tracing::error!("Metadata sync task error: {:?}", e);
-                }
+                },
                 Err(e) => {
                     tracing::error!("Metadata sync task join error: {:?}", e);
-                }
+                },
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// 更新服务器状态（包括元数据服务器和数据服务器）
     pub async fn update_server_status(
         shared: &Shared,
@@ -177,9 +189,10 @@ impl KvCacheClient {
             let mut meta_collect = shared.meta_server_collect.write().await;
             for updated_server in meta_servers {
                 // 根据IP和端口查找并更新对应的服务器
-                if let Some(pos) = meta_collect.iter().position(|s| 
-                    s.ip == updated_server.ip && s.port == updated_server.port
-                ) {
+                if let Some(pos) = meta_collect
+                    .iter()
+                    .position(|s| s.ip == updated_server.ip && s.port == updated_server.port)
+                {
                     meta_collect[pos] = updated_server;
                 } else {
                     // 如果没有找到对应的服务器，说明是新加入的元数据服务器
@@ -190,25 +203,30 @@ impl KvCacheClient {
                     if let Err(e) = Self::get_kvmeta(shared, updated_server.clone()).await {
                         // 如果失败,从列表中移除
                         let mut meta_collect = shared.meta_server_collect.write().await;
-                        meta_collect.retain(|s| !(s.ip == updated_server.ip && s.port == updated_server.port));
-                        tracing::error!("Failed to get initial KV meta from new meta server {}: {:?}", updated_server.ip, e);
+                        meta_collect.retain(|s| {
+                            !(s.ip == updated_server.ip && s.port == updated_server.port)
+                        });
+                        tracing::error!(
+                            "Failed to get initial KV meta from new meta server {}: {:?}",
+                            updated_server.ip,
+                            e
+                        );
                     }
-                    
+
                     // 重新获取锁以便继续循环
                     meta_collect = shared.meta_server_collect.write().await;
                 }
             }
         }
-        
+
         // 更新数据服务器状态
         {
             let mut data_collect = shared.data_server_collect.write().await;
             for updated_server in data_servers {
                 // 根据IP和端口查找并更新对应的服务器
-                if let Some(pos) = data_collect.iter().position(|s| 
-                    s.ip == updated_server.ip && 
-                    s.http_port == updated_server.http_port
-                ) {
+                if let Some(pos) = data_collect.iter().position(|s| {
+                    s.ip == updated_server.ip && s.http_port == updated_server.http_port
+                }) {
                     data_collect[pos] = updated_server;
                 }
             }
@@ -231,12 +249,19 @@ impl KvCacheClient {
     /// 向新加入的元数据服务器发起全量同步请求
     pub async fn get_kvmeta(shared: &Shared, meta_server: MetaServer) -> anyhow::Result<()> {
         let addr = format!("http://{}:{}", meta_server.ip, meta_server.port);
-        let data_servers: Vec<cedfs_proto::kvcache::DataServer> = shared.data_server_collect.read().await.clone().into_iter().map(|d|d.into()).collect();
+        let data_servers: Vec<cedfs_proto::kvcache::DataServer> = shared
+            .data_server_collect
+            .read()
+            .await
+            .clone()
+            .into_iter()
+            .map(|d| d.into())
+            .collect();
         let req = GetKvMetaRequest {
             meta_server: Some(shared.config.local_meta_server.clone().into()),
             data_server: data_servers,
         };
-        
+
         match KvMeta2MetaClient::connect(addr.clone()).await {
             Ok(mut client) => {
                 match client.get_kv_meta(req).await {
@@ -249,21 +274,24 @@ impl KvCacheClient {
                         }
                         // 更新引用计数
                         for count in resp.local_counts.into_iter() {
-                            shared.ref_count.increment_global_ref_count(bytes2hash(count.token_hash), count.count);
+                            shared.ref_count.increment_global_ref_count(
+                                bytes2hash(count.token_hash),
+                                count.count,
+                            );
                         }
-                        
+
                         Ok(())
-                    }
+                    },
                     // RPC调用失败
-                    Err(e) => {
-                        Err(anyhow::anyhow!("Failed to update meta on {}: {:?}", addr, e))
-                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to update meta on {}: {:?}",
+                        addr,
+                        e
+                    )),
                 }
-            }
+            },
             // 连接失败
-            Err(e) => {
-                Err(anyhow::anyhow!("Failed to connect to {}: {:?}", addr, e))
-            }
+            Err(e) => Err(anyhow::anyhow!("Failed to connect to {}: {:?}", addr, e)),
         }
     }
 
@@ -271,96 +299,50 @@ impl KvCacheClient {
     pub async fn move_kv_replica(&self) -> anyhow::Result<()> {
         let transfer_items = PopularityScoreOp {
             shared: self.shared.clone(),
-        }.run().await;
-        
-        // 按源服务器分组数据
-        use std::collections::HashMap;
-        let mut server_groups: HashMap<u32, Vec<([u8; 32], u32, DataServer)>> = HashMap::new();
-        
-        for (token_hash, offset, source_server, target_server) in transfer_items {
-            server_groups
-                .entry(source_server.id)
-                .or_insert_with(Vec::new)
-                .push((token_hash, offset, target_server));
         }
-        
+        .run()
+        .await;
+
         // 对每个源服务器发起迁移请求
-        for (source_server_id, items) in server_groups {
-            // 查找源服务器信息
-            let source_server = {
-                let data_collect = self.shared.data_server_collect.read().await;
-                data_collect.iter().find(|s| s.id == source_server_id).cloned()
-            };
-            
-            if let Some(source_server) = source_server {
-                // 获取第一个目标服务器（所有items应该有相同的目标服务器）
-                if let Some((_, _, target_server)) = items.first() {
-                    // 准备请求参数
-                    let hashes: Vec<i64> = items.iter().map(|(hash, _, _)| hash_to_i64(*hash)).collect();
-                    let offsets: Vec<i64> = items.iter().map(|(_, offset, _)| *offset as i64).collect();
-                    let old_position = (source_server.ip.to_string(), source_server.http_port.to_string());
-                    
-                    // 目标服务器的信息（接收方）
-                    let peer_ip = target_server.ip.to_string();
-                    let peer_init_port = self.shared.config.transfer_meta_port as i32;
-                    let peer_lookup_port = self.shared.config.transfer_meta_port as i32;
-                    
-                    // 发送迁移请求到源服务器
-                    let url = format!("http://{}:{}", source_server.ip, source_server.http_port);
-                    let client = MoveKVReplicaOp::new(&url);
-                    
-                    match client.send_transfer_request(
-                        hashes.clone(),
-                        old_position,
-                        offsets,
-                        peer_ip.clone(),
-                        peer_init_port,
-                        peer_lookup_port,
-                        true, // do_copy = true，表示复制而非移动
-                    ).await {
-                        Ok(response) => {
-                            tracing::info!(
-                                "Successfully transferred {} tokens from server {} ({}:{}) to server {} ({}), num_tokens: {}",
-                                items.len(),
-                                source_server.id,
-                                source_server.ip,
-                                source_server.http_port,
-                                target_server.id,
-                                target_server.ip,
-                                response.num_tokens
-                            );
-                            
-                            // 更新本地元数据（如果目标服务器是本地）
-                            let local_meta = &self.shared.config.local_meta_server;
-                            if target_server.ip == local_meta.ip 
-                                && target_server.http_port == self.shared.config.transfer_meta_port as u16 {
-                                for (token_hash, _, _) in &items {
-                                    // 将token_hash添加到本地索引
-                                    self.shared.insert_local_kvcache(*token_hash).await;
-                                    
-                                    // 记录更新操作
-                                    let update_op = UpdateKvOp {
-                                        token_hash: *token_hash,
-                                        operation: 1, // 添加副本操作
-                                        server_id: target_server.id,
-                                    };
-                                    self.shared.update_kvop_table.insert(*token_hash, update_op);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to transfer from server {} ({}:{}) to server {} ({}): {:?}",
-                                source_server.id,
-                                source_server.ip,
-                                source_server.http_port,
-                                target_server.id,
-                                target_server.ip,
-                                e
-                            );
-                        }
-                    }
-                }
+        for (token_hash, offset, src_server, dst_server) in transfer_items {
+            let old_position = (
+                src_server.ip.to_string(),
+                src_server.http_port.to_string(),
+            );
+
+            // 发送迁移请求到源服务器
+            let url = format!("http://{}:{}", src_server.ip, src_server.http_port);
+            let client = MoveKVReplicaOp::new(&url);
+
+            match client
+                .send_transfer_request(
+                    vec![token_hash],
+                    old_position,
+                    vec![offset as i64],
+                    dst_server.ip.to_string(),
+                    dst_server.init_port as i32,
+                    true,
+                )
+                .await
+            {
+                Ok(response) => {
+                    tracing::info!(
+                        "Successfully transferred from server {} to server {}, num_tokens: {}",
+                        src_server.id,
+                        dst_server.id,
+                        response.num_tokens
+                    );
+
+                    // 更新本地元数据
+                },
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to transfer from server {} to server {} : {:?}",
+                        src_server.id,
+                        dst_server.id,
+                        e
+                    );
+                },
             }
         }
 

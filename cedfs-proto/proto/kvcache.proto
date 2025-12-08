@@ -65,7 +65,6 @@ service KvMeta2Data {
 // 1.数据服务器向元数据服务器上传本地新增kvcache元数据
 message UploadKvMetaRequest {
     uint32 server_id = 1;
-    uint32 offset = 2;
     repeated uint32 tokens = 3; 
 }
 

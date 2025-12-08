@@ -105,8 +105,6 @@ pub struct SearchResult {
 pub struct UploadKvMetaRequest {
     #[prost(uint32, tag = "1")]
     pub server_id: u32,
-    #[prost(uint32, tag = "2")]
-    pub offset: u32,
     #[prost(uint32, repeated, tag = "3")]
     pub tokens: ::prost::alloc::vec::Vec<u32>,
 }

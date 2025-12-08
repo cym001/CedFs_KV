@@ -133,11 +133,3 @@ pub fn vecbytes2vechash(v: Vec<Vec<u8>>) -> Vec<[u8; 32]> {
     }
     out
 }
-
-/// 将 [u8; 32] 哈希转换为 i64（取前8字节）
-pub fn hash_to_i64(hash: [u8; 32]) -> i64 {
-    i64::from_be_bytes([
-        hash[0], hash[1], hash[2], hash[3],
-        hash[4], hash[5], hash[6], hash[7],
-    ])
-}

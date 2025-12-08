@@ -42,11 +42,11 @@ pub struct Config {
     // 采用的hash算法
     pub hash_algorithm: String,
 
+    // hash种子值
+    pub hash_seed: u64,
+
     // model_name到tokenizer_path的映射
     pub model_tokenizer_map: HashMap<String, String>,
-
-    // mooncake transfer engine meta http port
-    pub transfer_meta_port: u16,
 
 }
 
@@ -88,11 +88,11 @@ impl Config {
         let hash_algorithm: String = config.get("hash_algorithm")
             .map_err(|e| ConfigError::MissingField(format!("hash_algorithm: {}", e)))?;
 
+        let hash_seed: u64 = config.get("hash_seed")
+            .map_err(|e| ConfigError::MissingField(format!("hash_seed: {}", e)))?;
+
         let model_tokenizer_map: HashMap<String, String> = config.get("model_tokenizer_map")
             .map_err(|e| ConfigError::MissingField(format!("model_tokenizer_map: {}", e)))?;
-
-        let transfer_meta_port: u16 = config.get("transfer_meta_port")
-            .map_err(|e| ConfigError::MissingField(format!("transfer_meta_port: {}", e)))?;
         
         Ok(ConfigBuilder::default()
             .loaded_config(config)
@@ -107,8 +107,8 @@ impl Config {
             .block_size(block_size)
             .unfull_chunk(unfull_chunk)
             .hash_algorithm(hash_algorithm)
+            .hash_seed(hash_seed)
             .model_tokenizer_map(model_tokenizer_map)
-            .transfer_meta_port(transfer_meta_port)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

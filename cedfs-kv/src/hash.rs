@@ -1,6 +1,7 @@
 use sha2::{Sha256, Digest};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use serde::Serialize;
 
 /// 哈希算法类型
 #[derive(Debug, Clone, Copy)]
@@ -73,34 +74,38 @@ pub struct TokenHasher {
     algorithm: HashAlgorithm,
     none_hash: HashValue,
     unfull_chunk: bool,
+    seed: u64,
 }
 
 impl TokenHasher {
     /// 创建新的 TokenHasher
-    pub fn new(algorithm: HashAlgorithm, unfull_chunk: bool) -> Self {
-        let none_hash = Self::compute_none_hash(algorithm);
+    pub fn new(algorithm: HashAlgorithm, unfull_chunk: bool, seed: u64) -> Self {
+        let none_hash = Self::compute_none_hash(algorithm, seed);
         Self {
             algorithm,
             none_hash,
             unfull_chunk,
+            seed,
         }
     }
 
     /// 使用默认的 builtin 算法创建
     pub fn default() -> Self {
-        Self::new(HashAlgorithm::Builtin, false)
+        Self::new(HashAlgorithm::Builtin, false, 0)
     }
 
     /// 计算 NONE_HASH 的初始值
-    fn compute_none_hash(algorithm: HashAlgorithm) -> HashValue {
+    fn compute_none_hash(algorithm: HashAlgorithm, seed: u64) -> HashValue {
         match algorithm {
             HashAlgorithm::Builtin => {
                 let mut hasher = DefaultHasher::new();
+                seed.hash(&mut hasher);
                 None::<u32>.hash(&mut hasher);
                 HashValue::U64(hasher.finish())
             }
             HashAlgorithm::Sha256 | HashAlgorithm::Sha256Cbor => {
                 let mut hasher = Sha256::new();
+                hasher.update(seed.to_le_bytes());
                 hasher.update(b"None");
                 HashValue::U256(hasher.finalize().into())
             }
@@ -146,6 +151,7 @@ impl TokenHasher {
     ) -> HashValue {
         let mut hasher = DefaultHasher::new();
         
+        self.seed.hash(&mut hasher);
         prefix_hash.hash(&mut hasher);
         tokens.hash(&mut hasher);
         extra_keys.hash(&mut hasher);
@@ -154,32 +160,51 @@ impl TokenHasher {
     }
 
     /// 使用 SHA256 哈希
+    /// 
+    /// 该函数模拟 Python 的行为：
+    /// ```python
+    /// def sha256(input: Any) -> bytes:
+    ///     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    ///     return hashlib.sha256(input_bytes).digest()
+    /// 
+    /// self.hash_func((prefix_hash, tokens_tuple, extra_keys))
+    /// ```
     fn sha256_hash(
         &self,
         tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
-        let mut hasher = Sha256::new();
+        // 创建一个可序列化的结构来匹配 Python 的 tuple
+        #[derive(Serialize)]
+        struct HashInput<'a> {
+            prefix_hash: Option<Vec<u8>>,
+            tokens: &'a [u32],
+            extra_keys: Option<&'a [String]>,
+        }
         
-        if let Some(hash) = prefix_hash {
+        // 将 prefix_hash 转换为字节数组（如果存在）
+        let prefix_bytes = prefix_hash.map(|hash| {
             match hash {
-                HashValue::U64(v) => hasher.update(v.to_le_bytes()),
-                HashValue::U256(bytes) => hasher.update(bytes),
+                HashValue::U64(v) => v.to_le_bytes().to_vec(),
+                HashValue::U256(bytes) => bytes.to_vec(),
             }
-        }
+        });
         
-        for token in tokens {
-            hasher.update(token.to_le_bytes());
-        }
+        let input = HashInput {
+            prefix_hash: prefix_bytes,
+            tokens,
+            extra_keys,
+        };
         
-        if let Some(keys) = extra_keys {
-            for key in keys {
-                hasher.update(key.as_bytes());
-            }
-        }
+        // 使用 bincode 序列化（类似于 pickle）
+        let serialized = bincode::serialize(&input).expect("Failed to serialize hash input");
         
+        // 计算 SHA256
+        let mut hasher = Sha256::new();
+        hasher.update(&serialized);
         let result = hasher.finalize();
+        
         HashValue::U256(result.into())
     }
 
@@ -191,6 +216,9 @@ impl TokenHasher {
         extra_keys: Option<&[String]>,
     ) -> HashValue {
         let mut hasher = Sha256::new();
+        
+        hasher.update(b"seed:");
+        hasher.update(self.seed.to_le_bytes());
         
         if let Some(hash) = prefix_hash {
             hasher.update(b"prefix:");
@@ -216,22 +244,23 @@ impl TokenHasher {
         HashValue::U256(result.into())
     }
 
-    /// SHA256 分块迭代哈希（返回所有中间哈希值）
+    /// SHA256 分块迭代哈希（返回所有中间哈希值和偏移量）
     /// 
     /// 将输入 tokens 按照 block_size 分成若干块，迭代计算它们的哈希
-    /// 返回每一步的哈希值（包括最终哈希）
+    /// 返回每一步的哈希值和对应的偏移量（块结束位置）
     /// 
     /// # 参数
     /// - `tokens`: 输入的 token 序列
     /// - `block_size`: 每个块的大小
     /// 
     /// # 返回
-    /// 包含每个块计算后的哈希值的 Vec
+    /// 包含每个块计算后的哈希值和偏移量的 Vec<(HashValue, offset)>
+    /// offset 表示该块在 tokens 中的结束位置（不包含）
     pub fn hash_tokens_with_blocks_all(
         &self,
         tokens: &[u32],
         block_size: usize,
-    ) -> Vec<HashValue> {
+    ) -> Vec<(HashValue, u32)> {
         if block_size == 0 {
             panic!("block_size must be greater than 0");
         }
@@ -256,7 +285,8 @@ impl TokenHasher {
             }
             
             current_hash = self.sha256_hash(chunk, Some(&current_hash), None);
-            results.push(current_hash.clone());
+            let offset = chunk.len() as u32;
+            results.push((current_hash.clone(), offset));
         }
         
         results
@@ -286,18 +316,23 @@ mod tests {
 
     #[test]
     fn test_hash_tokens_with_blocks_all() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256, false);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256, false, 0);
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
         
-        let hashes = hasher.hash_tokens_with_blocks_all(&tokens, 2);
+        let results = hasher.hash_tokens_with_blocks_all(&tokens, 2);
         
-        // 应该有 3 个哈希值 (6 tokens / 2 = 3 blocks)
-        assert_eq!(hashes.len(), 3);
+        // 应该有 3 个哈希值和偏移量 (6 tokens / 2 = 3 blocks)
+        assert_eq!(results.len(), 3);
+        
+        // 验证偏移量
+        assert_eq!(results[0].1, 2);  // 第一个块结束于位置 2
+        assert_eq!(results[1].1, 2);  // 第二个块结束于位置 4
+        assert_eq!(results[2].1, 2);  // 第三个块结束于位置 6
     }
 
     #[test]
     fn test_builtin_hash_u32() {
-        let hasher = TokenHasher::new(HashAlgorithm::Builtin, false);
+        let hasher = TokenHasher::new(HashAlgorithm::Builtin, false, 0);
         let tokens: Vec<u32> = vec![1, 2, 3];
         
         let hash = hasher.hash_tokens(&tokens, None, None);

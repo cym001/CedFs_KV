@@ -28,7 +28,7 @@ impl SearchKvOp {
                 .hasher
                 .hash_tokens_with_blocks_all(&token_list, self.shared.config.block_size)
                 .iter()
-                .map(|x| x.to_u256())
+                .map(|(hash, _offset)| hash.to_u256())
                 .collect();
 
             // 使用 search_tokens 查找所有 server 的匹配结果
@@ -107,7 +107,7 @@ impl SearchKvByPromptsOp {
                     .hasher
                     .hash_tokens_with_blocks_all(&token_list, self.shared.config.block_size)
                     .iter()
-                    .map(|x| x.to_u256())
+                    .map(|(hash, _offset)| hash.to_u256())
                     .collect();
 
                 // 使用 search_tokens 查找所有 server 的匹配结果

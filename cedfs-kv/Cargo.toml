@@ -33,5 +33,6 @@ tracing-subscriber = { workspace = true }
 tokenizers = { workspace = true , features = ["http"]}
 warp = { workspace = true }
 bytes = { workspace = true }
+num-bigint = "0.4"
 
 cedfs-proto = { version = "*", path = "../cedfs-proto" }

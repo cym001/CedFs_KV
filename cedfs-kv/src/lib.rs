@@ -107,7 +107,7 @@ impl KVServer {
                     },
                 };
 
-                let hasher = TokenHasher::new(algorithm, config.unfull_chunk);
+                let hasher = TokenHasher::new(algorithm, config.unfull_chunk, config.hash_seed);
 
                 // 初始化TokenizerManager并预加载所有配置的tokenizer
                 let tokenizer_manager = Arc::new(
@@ -532,7 +532,7 @@ impl Shared {
     /// # 返回
     /// - `true`: 成功创建或更新
     /// - `false`: 失败
-    pub fn create_new_kvblock(&self, server_id: u32, offset: u32, token_hash: Vec<[u8; 32]>) -> bool {
+    pub fn create_new_kvblock(&self, server_id: u32, offset: Vec<u32>, token_hash: Vec<[u8; 32]>) -> bool {
         if token_hash.is_empty() {
             return false;
         }
@@ -590,7 +590,7 @@ impl Shared {
                 // 不存在相同hash的块，创建新的KvBlockMeta
                 let new_meta = KvBlockMeta {
                     token_hash: current_hash,
-                    offset: offset,
+                    offset: offset[i],
                     next_tokens: next_tokens.clone(),
                     server_id: vec![server_id],
                 };

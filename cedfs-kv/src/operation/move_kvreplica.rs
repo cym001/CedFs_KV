@@ -3,12 +3,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TransferRequest {
-    hashes: Vec<i64>,
+    hashes: Vec<[u8;32]>,
     old_position: (String, String),
     offsets: Vec<i64>,
     peer_ip: String,
     peer_init_port: i32,
-    peer_lookup_port: i32,
     do_copy: bool,
 }
 
@@ -34,12 +33,11 @@ impl MoveKVReplicaOp {
     // 发送 transfer 请求
     pub async fn send_transfer_request(
         &self,
-        hashes: Vec<i64>,
+        hashes: Vec<[u8;32]>,
         old_position: (String, String),
         offsets: Vec<i64>,
         peer_ip: String,
         peer_init_port: i32,
-        peer_lookup_port: i32,
         do_copy: bool,
     ) -> Result<TransferResponse, reqwest::Error> {
         let request_body = TransferRequest {
@@ -48,7 +46,6 @@ impl MoveKVReplicaOp {
             offsets,
             peer_ip,
             peer_init_port,
-            peer_lookup_port,
             do_copy,
         };
 
