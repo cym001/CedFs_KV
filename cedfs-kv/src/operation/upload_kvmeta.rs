@@ -10,6 +10,9 @@ pub struct UploadKvMetaOp {
 
 impl UploadKvMetaOp {
     pub async fn run(&self) -> anyhow::Result<()> {
+        // 在日志中输出 tokens
+        tracing::info!("Uploading KVMeta, server_id: {}, tokens: {:?}", self.server_id, self.tokens);
+        
         let hash_results = self
             .shared
             .hasher
@@ -36,15 +39,7 @@ impl UploadKvMetaOp {
             self.server_id,
             hash_results.len(),
             offsets,
-            tokens_hash.iter().map(|h| {
-                // 将32字节数组转换为256位无符号整数（大端序）
-                let mut result = num_bigint::BigUint::from(0u32);
-                for &byte in h.iter() {
-                    result = result << 8;
-                    result = result + num_bigint::BigUint::from(byte);
-                }
-                result.to_string()
-            }).collect::<Vec<_>>()
+            tokens_hash.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
         );
         
         Ok(())

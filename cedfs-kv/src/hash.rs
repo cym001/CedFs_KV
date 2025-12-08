@@ -9,6 +9,7 @@ pub enum HashAlgorithm {
     Builtin,
     Sha256,
     Sha256Cbor,
+    Sha256CrossLanguage,
 }
 
 /// 哈希结果类型 - 可以是 64 位或 256 位
@@ -109,6 +110,12 @@ impl TokenHasher {
                 hasher.update(b"None");
                 HashValue::U256(hasher.finalize().into())
             }
+            HashAlgorithm::Sha256CrossLanguage => {
+                // Cross-language None serialization: 32 bytes of zeros
+                let mut hasher = Sha256::new();
+                hasher.update(&[0u8; 32]);
+                HashValue::U256(hasher.finalize().into())
+            }
         }
     }
 
@@ -138,6 +145,9 @@ impl TokenHasher {
             }
             HashAlgorithm::Sha256Cbor => {
                 self.sha256_cbor_hash(tokens, prefix_hash, extra_keys)
+            }
+            HashAlgorithm::Sha256CrossLanguage => {
+                self.sha256_cross_language_hash(tokens, prefix_hash, extra_keys)
             }
         }
     }
@@ -265,8 +275,8 @@ impl TokenHasher {
             panic!("block_size must be greater than 0");
         }
 
-        if !matches!(self.algorithm, HashAlgorithm::Sha256) {
-            panic!("Block-based hashing only supported for Sha256 algorithm");
+        if !matches!(self.algorithm, HashAlgorithm::Sha256 | HashAlgorithm::Sha256CrossLanguage) {
+            panic!("Block-based hashing only supported for Sha256 and Sha256CrossLanguage algorithms");
         }
 
         let mut results = Vec::new();
@@ -283,8 +293,20 @@ impl TokenHasher {
             if is_last_chunk && is_unfull_chunk && !self.unfull_chunk {
                 break;
             }
-            
-            current_hash = self.sha256_hash(chunk, Some(&current_hash), None);
+            // INSERT_YOUR_CODE
+            // 根据 hash 算法调用合适的 hash 函数
+            current_hash = match self.algorithm {
+                HashAlgorithm::Sha256CrossLanguage => {
+                    self.sha256_cross_language_hash(chunk, Some(&current_hash), None)
+                }
+                HashAlgorithm::Sha256 => {
+                    self.sha256_hash(chunk, Some(&current_hash), None)
+                }
+                _ => {
+                    panic!("Only Sha256 and Sha256CrossLanguage supported in hash_tokens_with_blocks_all");
+                }
+            };
+            // current_hash = self.sha256_hash(chunk, Some(&current_hash), None);
             let offset = chunk.len() as u32;
             results.push((current_hash.clone(), offset));
         }
@@ -306,7 +328,57 @@ impl TokenHasher {
             prefix_hash.clone()
         })
     }
+
+    /// 使用跨语言一致的 SHA256 哈希
+    /// 
+    /// 该函数实现与 Python 的 sha256_cross_language 相同的序列化和哈希逻辑
+    /// 
+    /// 序列化格式：
+    /// - 前 32 字节（256 位）：prefix_hash 作为大端无符号整数（如果为 None，使用全零）
+    /// - 后续字节：每个 token 作为 4 字节大端无符号整数（value & 0xFFFFFFFF）
+    /// - extra_keys：当前忽略
+    fn sha256_cross_language_hash(
+        &self,
+        tokens: &[u32],
+        prefix_hash: Option<&HashValue>,
+        extra_keys: Option<&[String]>,
+    ) -> HashValue {
+        let mut hasher = Sha256::new();
+        
+        // prefix_hash: 32 字节（256 位）大端无符号整数
+        match prefix_hash {
+            None => {
+                // 如果为 None，使用全零
+                hasher.update(&[0u8; 32]);
+            }
+            Some(hash) => {
+                match hash {
+                    HashValue::U256(bytes) => {
+                        // 直接使用 32 字节
+                        hasher.update(bytes);
+                    }
+                    HashValue::U64(_) => {
+                        // U64 不支持，使用全零
+                        hasher.update(&[0u8; 32]);
+                    }
+                }
+            }
+        }
+        
+        // tokens: 每个 token 作为 4 字节大端无符号整数
+        for &token in tokens {
+            let uint32_val = token & 0xFFFFFFFF;
+            hasher.update(&uint32_val.to_be_bytes());
+        }
+        
+        // extra_keys: 当前忽略
+        let _ = extra_keys;
+        
+        HashValue::U256(hasher.finalize().into())
+    }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -337,5 +409,119 @@ mod tests {
         
         let hash = hasher.hash_tokens(&tokens, None, None);
         assert!(matches!(hash, HashValue::U64(_)));
+    }
+
+
+    #[test]
+    fn test_cross_language_hasher() {
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let tokens: Vec<u32> = vec![1, 2, 3];
+        
+        let hash = hasher.hash_tokens(&tokens, None, None);
+        assert!(matches!(hash, HashValue::U256(_)));
+        
+        // Test with prefix hash
+        let prefix = hasher.get_init_hash();
+        let hash_with_prefix = hasher.hash_tokens(&tokens, Some(&prefix), None);
+        assert!(matches!(hash_with_prefix, HashValue::U256(_)));
+        
+        // Hashes should be different
+        assert_ne!(hash, hash_with_prefix);
+    }
+
+    #[test]
+    fn test_cross_language_hash_with_extra_keys() {
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let tokens: Vec<u32> = vec![1, 2, 3];
+        let extra_keys = vec!["key1".to_string(), "key2".to_string()];
+        
+        let hash_without_keys = hasher.hash_tokens(&tokens, None, None);
+        let hash_with_keys = hasher.hash_tokens(&tokens, None, Some(&extra_keys));
+        
+        // In the new implementation, extra_keys are ignored, so hashes should be the same
+        assert_eq!(hash_without_keys, hash_with_keys);
+    }
+
+
+    #[test]
+    fn test_cross_language_hash_v2_none_hash() {
+        // Test NONE_HASH: (None, [], None)
+        // Expected from Python: 66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hash = hasher.get_init_hash();
+        
+        let expected = [
+            102, 104, 122, 173, 248, 98, 189, 119, 108, 143, 193, 139, 142, 159, 142, 32,
+            8, 151, 20, 133, 110, 226, 51, 179, 144, 42, 89, 29, 13, 95, 41, 37
+        ];
+        
+        match hash {
+            HashValue::U256(bytes) => {
+                assert_eq!(bytes, expected, "NONE_HASH mismatch");
+            }
+            _ => panic!("Expected U256 hash"),
+        }
+    }
+
+    #[test]
+    fn test_cross_language_hash_v2_with_tokens() {
+        // Test: (None, [1, 2, 3], None)
+        // Expected from Python: db9ea6001d3ab7d3f65542eef1d4f0ea18106524bd4f57b99d368f9b7a86c5cf
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let tokens: Vec<u32> = vec![1, 2, 3];
+        let hash = hasher.hash_tokens(&tokens, None, None);
+        
+        let expected = [
+            219, 158, 166, 0, 29, 58, 183, 211, 246, 85, 66, 238, 241, 212, 240, 234,
+            24, 16, 101, 36, 189, 79, 87, 185, 157, 54, 143, 155, 122, 134, 197, 207
+        ];
+        
+        match hash {
+            HashValue::U256(bytes) => {
+                assert_eq!(bytes, expected, "Hash of [1, 2, 3] mismatch");
+            }
+            _ => panic!("Expected U256 hash"),
+        }
+    }
+
+    #[test]
+    fn test_cross_language_hash_v2_with_prefix() {
+        // Test iterative hashing
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        
+        // Initial hash (None, [], None)
+        let mut current_hash = hasher.get_init_hash();
+        let expected_init = [
+            102, 104, 122, 173, 248, 98, 189, 119, 108, 143, 193, 139, 142, 159, 142, 32,
+            8, 151, 20, 133, 110, 226, 51, 179, 144, 42, 89, 29, 13, 95, 41, 37
+        ];
+        assert_eq!(current_hash.as_u256().unwrap(), expected_init);
+        
+        // After block [1, 2]
+        let tokens1: Vec<u32> = vec![1, 2];
+        current_hash = hasher.hash_tokens(&tokens1, Some(&current_hash), None);
+        let expected_after_12 = [
+            231, 126, 234, 14, 187, 244, 253, 63, 62, 214, 102, 98, 34, 211, 208, 16,
+            57, 62, 29, 69, 242, 226, 128, 190, 223, 144, 73, 135, 173, 127, 197, 36
+        ];
+        assert_eq!(current_hash.as_u256().unwrap(), expected_after_12);
+        
+        // After block [3, 4]
+        let tokens2: Vec<u32> = vec![3, 4];
+        current_hash = hasher.hash_tokens(&tokens2, Some(&current_hash), None);
+        let expected_after_34 = [
+            47, 142, 85, 133, 204, 94, 103, 30, 211, 59, 76, 101, 73, 91, 248, 62,
+            208, 148, 149, 115, 65, 254, 162, 216, 213, 200, 133, 72, 21, 98, 82, 47
+        ];
+        assert_eq!(current_hash.as_u256().unwrap(), expected_after_34);
+        
+        // After block [5, 6]
+        let tokens3: Vec<u32> = vec![5, 6];
+        current_hash = hasher.hash_tokens(&tokens3, Some(&current_hash), None);
+        let expected_after_56 = [
+            198, 188, 165, 234, 224, 191, 171, 225, 194, 175, 212, 222, 3, 144, 149, 4,
+            38, 86, 133, 145, 205, 217, 185, 191, 52, 110, 143, 31, 57, 38, 165, 65
+        ];
+        assert_eq!(current_hash.as_u256().unwrap(), expected_after_56);
     }
 }

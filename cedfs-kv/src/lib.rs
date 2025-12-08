@@ -98,6 +98,7 @@ impl KVServer {
                     "builtin" => HashAlgorithm::Builtin,
                     "sha256" => HashAlgorithm::Sha256,
                     "sha256_cbor" => HashAlgorithm::Sha256Cbor,
+                    "sha256_cross_language" => HashAlgorithm::Sha256CrossLanguage,
                     _ => {
                         tracing::warn!(
                             "Unknown hash algorithm '{}', using default 'builtin'",
