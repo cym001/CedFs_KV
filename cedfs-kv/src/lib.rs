@@ -28,11 +28,17 @@ pub mod transfer;
 
 #[derive(Clone)]
 pub struct Shared {
-    // 本域内推理节点信息
-    pub data_server_collect: Arc<RwLock<Vec<DataServer>>>,
-
     // 各域间元数据服务器信息
     pub meta_server_collect: Arc<RwLock<Vec<MetaServer>>>,
+
+    // 全局推理节点信息（按域划分）
+    pub global_data_server_collect: Arc<DashMap<u32, Vec<DataServer>>>,
+
+    // 本域内推理节点信息
+    pub local_data_server_collect: Arc<RwLock<Vec<DataServer>>>,
+
+    // 推理节点ID到元数据服务器ID的映射
+    pub data_server_to_meta_server: Arc<DashMap<u32, u32>>,
 
     // hash生成器
     pub hasher: Arc<TokenHasher>,
@@ -116,8 +122,10 @@ impl KVServer {
                 );
                 
                 let shared = Shared {
-                    data_server_collect: data_servers,
                     meta_server_collect: meta_servers,
+                    global_data_server_collect: Arc::new(DashMap::new()),
+                    local_data_server_collect: data_servers,
+                    data_server_to_meta_server: Arc::new(DashMap::new()),
                     hasher: Arc::new(hasher),
                     tokenizer_manager,
                     local_kv_index: Arc::new(RwLock::new(HashSet::new())),

@@ -354,7 +354,6 @@ impl TokenHasher {
                     buf.resize(32, 0);         // 保证32字节
                     buf
                 };
-                tracing::info!("normalized_be (prefix_hash serialized to 32B, BE): {}", hex::encode(&normalized_be));
                 hasher.update(&normalized_be);
             }
         } else {
@@ -365,14 +364,12 @@ impl TokenHasher {
         let mut token_bytes = Vec::with_capacity(tokens.len() * 4);
         for &t in tokens {
             token_bytes.extend_from_slice(&t.to_le_bytes());
-        }
-        tracing::info!("cross_language: hashing {} tokens as {} bytes: {}", tokens.len(), token_bytes.len(), hex::encode(&token_bytes));
+        }        
         hasher.update(&token_bytes);
         
         // extra_keys: 当前忽略
         let _ = extra_keys;
         let final_hash = hasher.finalize();
-        tracing::info!("cross_language: final hash value: {}", hex::encode(&final_hash));
         HashValue::U256(final_hash.into())
     }
 }

@@ -34,6 +34,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
 impl From<ProtoMetaServer> for MetaServer {
     fn from(proto: ProtoMetaServer) -> Self {
         MetaServer {
+            id: proto.id,
             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::    Ipv4Addr::LOCALHOST)),
             port: proto.port as u16,
             layer: proto.layer,
@@ -44,6 +45,7 @@ impl From<ProtoMetaServer> for MetaServer {
 impl From<MetaServer> for ProtoMetaServer {
     fn from(internal: MetaServer) -> Self {
         ProtoMetaServer {
+            id: internal.id,
             ip: internal.ip.to_string(),
             port: internal.port as u32,
             layer: internal.layer,

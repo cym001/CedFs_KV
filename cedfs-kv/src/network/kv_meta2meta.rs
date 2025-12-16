@@ -58,7 +58,7 @@ impl KvMeta2Meta for KvCacheMetaService{
         match resp {
             Ok(_) => Ok(Response::new(UpdateKvMetaResponse {meta_server: (*self.shared.meta_server_collect)
                 .read().await.clone().into_iter().map(|m| m.into()).collect()
-                , data_server: (*self.shared.data_server_collect).read().await
+                , data_server: (*self.shared.local_data_server_collect).read().await
                 .clone().into_iter().map(|d| d.into()).collect()})),
             Err(e) => Err(Status::internal(e.to_string())), 
         }    

@@ -34,7 +34,6 @@ tokenizers = { workspace = true , features = ["http"]}
 warp = { workspace = true }
 bytes = { workspace = true }
 num-bigint = "0.4"
-hex = "0.4"
 
 cedfs-proto = { version = "*", path = "../cedfs-proto" }
 

@@ -26,14 +26,17 @@ pub struct DataServer {
 /// 元数据服务器信息
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MetaServer {
+    /// 元数据管理器id
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
     /// IP地址（字符串形式）
-    #[prost(string, tag = "1")]
+    #[prost(string, tag = "2")]
     pub ip: ::prost::alloc::string::String,
     /// 端口
-    #[prost(uint32, tag = "2")]
+    #[prost(uint32, tag = "3")]
     pub port: u32,
     /// 网络层级
-    #[prost(uint32, tag = "3")]
+    #[prost(uint32, tag = "4")]
     pub layer: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -155,7 +158,7 @@ pub struct GetKvMetaResponse {
     /// 目标节点已知的元数据服务器信息
     #[prost(message, repeated, tag = "2")]
     pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点已知的数据服务器信息
+    /// 目标节点的数据服务器信息
     #[prost(message, repeated, tag = "3")]
     pub data_server: ::prost::alloc::vec::Vec<DataServer>,
     /// 本地所有 block 的全量计数
@@ -183,7 +186,7 @@ pub struct UpdateKvMetaResponse {
     /// 目标节点已知的元数据服务器信息
     #[prost(message, repeated, tag = "1")]
     pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点已知的数据服务器信息
+    /// 目标节点的数据服务器信息
     #[prost(message, repeated, tag = "2")]
     pub data_server: ::prost::alloc::vec::Vec<DataServer>,
 }

@@ -221,7 +221,7 @@ impl KvCacheClient {
 
         // 更新数据服务器状态
         {
-            let mut data_collect = shared.data_server_collect.write().await;
+            let mut data_collect = shared.local_data_server_collect.write().await;
             for updated_server in data_servers {
                 // 根据IP和端口查找并更新对应的服务器
                 if let Some(pos) = data_collect.iter().position(|s| {
@@ -250,7 +250,7 @@ impl KvCacheClient {
     pub async fn get_kvmeta(shared: &Shared, meta_server: MetaServer) -> anyhow::Result<()> {
         let addr = format!("http://{}:{}", meta_server.ip, meta_server.port);
         let data_servers: Vec<cedfs_proto::kvcache::DataServer> = shared
-            .data_server_collect
+            .local_data_server_collect
             .read()
             .await
             .clone()

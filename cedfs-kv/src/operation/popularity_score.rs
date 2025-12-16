@@ -55,11 +55,12 @@ impl PopularityScoreOp {
     
     /// 根据token_hash获取对应的源DataServer、offset和目标DataServer
     /// 返回: Vec<(token_hash, offset, source_server, target_server)>
-    /// 其中target_server为不在KvBlockMeta的server_id中的data_server_collect中的一个dataserver
+    /// 其中target_server必须是local_data_server_collect中不在KvBlockMeta的server_id中的dataserver
+    /// source_server可以从global_data_server_collect中的任意server选择
     pub async fn get_instance_from_token_hash(&self, ids: Vec<[u8; 32]>) -> Vec<([u8; 32], u32, DataServer, DataServer)> {
         
         let remote_kvcache_table = &self.shared.global_kvcache_table;
-        let data_server_collect = self.shared.data_server_collect.read().await;
+        let local_data_servers = self.shared.local_data_server_collect.read().await;
         
         let mut result = Vec::new();
         
@@ -68,26 +69,48 @@ impl PopularityScoreOp {
             if let Some(kv_meta) = remote_kvcache_table.get(&token_hash) {
                 let offset = kv_meta.offset;
                 
-                // 选择一个源server（取第一个）
-                if let Some(source_server_id) = kv_meta.server_id.first() {
-                    // 在data_server_collect中查找源DataServer
-                    let source_server = data_server_collect.iter()
-                        .find(|ds| ds.id == *source_server_id);
-                    
-                    if let Some(source_server) = source_server {
-                        // 查找不在kv_meta.server_id中的目标server
-                        let target_server = data_server_collect.iter()
-                            .find(|ds| !kv_meta.server_id.contains(&ds.id));
+                // 首先从local_data_server中查找不在kv_meta.server_id中的目标server
+                let target_server = local_data_servers.iter()
+                    .find(|ds| !kv_meta.server_id.contains(&ds.id));
+                
+                if let Some(target_server) = target_server {
+                    // 选择一个源server（取第一个）
+                    if let Some(source_server_id) = kv_meta.server_id.first() {
+                        // 从global_data_server_collect中查找源DataServer
+                        let mut source_server_found: Option<DataServer> = None;
                         
-                        if let Some(target_server) = target_server {
+                        // 通过映射找到源server所属的meta_server
+                        if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(source_server_id) {
+                            let meta_id = *meta_server_id;
+                            
+                            // 从global_data_server_collect中查找
+                            if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
+                                source_server_found = data_servers.iter()
+                                    .find(|ds| ds.id == *source_server_id)
+                                    .cloned();
+                            }
+                        }
+                        
+                        if let Some(source_server) = source_server_found {
                             result.push((
                                 token_hash,
                                 offset,
-                                source_server.clone(),
+                                source_server,
                                 target_server.clone()
                             ));
+                        } else {
+                            tracing::warn!(
+                                "Source server {} not found in global_data_server_collect for token_hash {:?}",
+                                source_server_id,
+                                token_hash
+                            );
                         }
                     }
+                } else {
+                    tracing::debug!(
+                        "No available target server in local_data_server_collect for token_hash {:?}",
+                        token_hash
+                    );
                 }
             }
         }

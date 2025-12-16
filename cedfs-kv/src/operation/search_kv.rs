@@ -35,17 +35,24 @@ impl SearchKvOp {
             let match_results = self.shared.search_tokens(token_hashes);
 
             // 生成最终结果：为每个匹配的 server_id 创建 KvBlockPos
-            let data_servers = self.shared.data_server_collect.read().await;
+            // 从全局数据节点集合中查找
             for (server_id, matched_length) in match_results {
-                // 查找对应的 DataServer 信息
-                if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
-                    let url = format!("{}:{}", data_server.ip, data_server.http_port);
-                    let kv_block_pos = KvBlockPos {
-                        model_name: data_server.model_name.clone(),
-                        url,
-                        len: matched_length,
-                    };
-                    search_result.block_pos.push(kv_block_pos);
+                // 首先通过映射找到该 data_server 所属的 meta_server
+                if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&server_id) {
+                    let meta_id = *meta_server_id;
+                    
+                    // 从 global_data_server_collect 中查找对应的 DataServer 信息
+                    if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
+                        if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
+                            let url = format!("{}:{}", data_server.ip, data_server.http_port);
+                            let kv_block_pos = KvBlockPos {
+                                model_name: data_server.model_name.clone(),
+                                url,
+                                len: matched_length,
+                            };
+                            search_result.block_pos.push(kv_block_pos);
+                        }
+                    }
                 }
             }
 
@@ -114,18 +121,25 @@ impl SearchKvByPromptsOp {
                 let match_results = self.shared.search_tokens(token_hashes);
 
                 // 生成结果：为每个匹配的 server_id 创建 KvBlockPos
-                let data_servers = self.shared.data_server_collect.read().await;
+                // 从全局数据节点集合中查找
                 for (server_id, matched_length) in match_results {
-                    // 查找对应的 DataServer 信息
-                    if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
-                        // 只添加model_name匹配的结果
-                        if &data_server.model_name == model_name {
-                            let kv_block_pos = KvBlockPos {
-                                model_name: data_server.model_name.clone(),
-                                url: data_server.url.clone(),
-                                len: matched_length,
-                            };
-                            search_result.block_pos.push(kv_block_pos);
+                    // 首先通过映射找到该 data_server 所属的 meta_server
+                    if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&server_id) {
+                        let meta_id = *meta_server_id;
+                        
+                        // 从 global_data_server_collect 中查找对应的 DataServer 信息
+                        if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
+                            if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
+                                // 只添加model_name匹配的结果
+                                if &data_server.model_name == model_name {
+                                    let kv_block_pos = KvBlockPos {
+                                        model_name: data_server.model_name.clone(),
+                                        url: data_server.url.clone(),
+                                        len: matched_length,
+                                    };
+                                    search_result.block_pos.push(kv_block_pos);
+                                }
+                            }
                         }
                     }
                 }

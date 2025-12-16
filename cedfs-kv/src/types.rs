@@ -62,6 +62,9 @@ pub struct DataServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaServer {
+    /// 元数据管理器id
+    pub id: u32,
+
     /// 存储机器的ip
     pub ip: IpAddr,
 
@@ -116,6 +119,7 @@ impl Default for DataServer {
 impl Default for MetaServer {
     fn default() -> Self {
         Self {
+            id: 0,
             // 默认0.0.0.0
             ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
             // 默认端口0
