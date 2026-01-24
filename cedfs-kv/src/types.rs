@@ -50,7 +50,9 @@ pub struct DataServer {
 
     /// zmq端口
     pub init_port: u16,
-    pub lookup_port: u16,
+
+    /// rpc端口
+    pub rpc_port: u16,
 
     /// 实例部署的模型名称
     pub model_name: String,
@@ -109,7 +111,7 @@ impl Default for DataServer {
             // 默认端口0
             http_port: 0,
             init_port: 0,
-            lookup_port: 0,    
+            rpc_port: 0,    
             model_name: "default_model_name".to_string(),
             url: "default_url".to_string(),
         }
@@ -212,6 +214,10 @@ impl RefCount {
     pub fn batch_increment_local_incremental_count(&self, token_hashes: &[[u8; 32]], increment: u64) {
         for &token_hash in token_hashes {
             self.local_incremental_count
+                .entry(token_hash)
+                .and_modify(|c| *c += increment)
+                .or_insert(increment);
+            self.global_ref_counts
                 .entry(token_hash)
                 .and_modify(|c| *c += increment)
                 .or_insert(increment);

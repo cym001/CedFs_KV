@@ -10,12 +10,12 @@ pub struct DataServer {
     /// http端口
     #[prost(uint32, tag = "3")]
     pub http_port: u32,
-    /// rpc端口
+    /// nixl init端口
     #[prost(uint32, tag = "4")]
     pub init_port: u32,
     /// rpc端口
     #[prost(uint32, tag = "5")]
-    pub lookup_port: u32,
+    pub rpc_port: u32,
     /// 模型名称
     #[prost(string, tag = "6")]
     pub model_name: ::prost::alloc::string::String,

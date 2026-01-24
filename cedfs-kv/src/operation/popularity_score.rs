@@ -7,17 +7,24 @@ pub struct PopularityScoreOp {
 
 impl PopularityScoreOp {
     pub async fn run(&self) -> Vec<([u8; 32], u32, DataServer, DataServer)> {
-        let token_hashs = Self::top_k_popularity(&self, self.shared.config.replica_pull_count as usize);
+        let token_hashs = self.top_k_popularity(self.shared.config.replica_pull_count as usize).await;
         self.get_instance_from_token_hash(token_hashs).await
     }
 
-    /// 获取远程引用计数中频率最大的k个token_hash，且这些token_hash不在本地引用计数中
-    pub fn top_k_popularity(&self, k: usize) -> Vec<[u8; 32]> {
+    /// 获取远程引用计数中频率最大的k个token_hash，且这些token_hash至少不在一个本地dataserver中
+    pub async fn top_k_popularity(&self, k: usize) -> Vec<[u8; 32]> {
         use std::collections::BinaryHeap;
         use std::cmp::Reverse;
         
-        let local_ref_counts = &self.shared.ref_count.local_ref_counts;
         let global_ref_counts = &self.shared.ref_count.global_ref_counts;
+        let global_kvcache_table = &self.shared.global_kvcache_table;
+        let local_data_servers = self.shared.local_data_server_collect.read().await;
+        
+        // 获取所有本地dataserver的id集合
+        let local_server_ids: std::collections::HashSet<u32> = local_data_servers
+            .iter()
+            .map(|ds| ds.id)
+            .collect();
         
         // 使用最小堆来维护top k
         let mut heap: BinaryHeap<Reverse<(u64, [u8; 32])>> = BinaryHeap::new();
@@ -27,8 +34,17 @@ impl PopularityScoreOp {
             let token_hash = *entry.key();
             let count = *entry.value();
             
-            // 跳过在本地引用计数中出现的token_hash
-            if local_ref_counts.contains_key(&token_hash) {
+            // 检查该token_hash是否至少不在一个本地dataserver中
+            // 即：该token_hash对应的server_id不包含所有本地dataserver
+            let should_include = if let Some(kv_meta) = global_kvcache_table.get(&token_hash) {
+                // 检查是否至少有一个本地dataserver不在kv_meta.server_id中
+                local_server_ids.iter().any(|local_id| !kv_meta.server_id.contains(local_id))
+            } else {
+                // 如果在global_kvcache_table中找不到，说明不在任何本地dataserver中
+                true
+            };
+            
+            if !should_include {
                 continue;
             }
             

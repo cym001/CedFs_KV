@@ -7,8 +7,8 @@ message DataServer {
     uint32 id = 1;         
     string ip = 2;                      // IP地址（字符串形式）
     uint32 http_port = 3;               // http端口
-    uint32 init_port = 4;               // rpc端口
-    uint32 lookup_port = 5;             // rpc端口
+    uint32 init_port = 4;               // nixl init端口
+    uint32 rpc_port = 5;                // rpc端口
     string model_name = 6;              // 模型名称
     string url = 7;                     // 实例url
 }
