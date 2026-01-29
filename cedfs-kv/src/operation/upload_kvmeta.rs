@@ -34,12 +34,17 @@ impl UploadKvMetaOp {
         self.shared.ref_count.batch_increment_local_incremental_count(&tokens_hash, 1);
         
         // 输出哈希值和偏移量信息
+        // tracing::info!(
+        //     "Upload KV metadata - server_id: {}, blocks: {}, offsets: {:?}, hashes: {:?}",
+        //     self.server_id,
+        //     hash_results.len(),
+        //     offsets,
+        //     tokens_hash.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
+        // );
         tracing::info!(
-            "Upload KV metadata - server_id: {}, blocks: {}, offsets: {:?}, hashes: {:?}",
+            "Upload KV metadata - server_id: {}, blocks: {}",
             self.server_id,
-            hash_results.len(),
-            offsets,
-            tokens_hash.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
+            hash_results.len()
         );
         
         Ok(())

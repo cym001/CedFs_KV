@@ -17,5 +17,5 @@ message TransferKvRequest {
 }
 
 message TransferKvResponse {
-    bool success = 1;
+    int32 status = 1;
 }

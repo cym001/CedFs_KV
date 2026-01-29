@@ -110,7 +110,7 @@ impl KvCacheClient {
                 .await
             {
                 Ok(response) => {
-                    if response.success {
+                    if response.status > 0 {
                         success_count += 1;
                         tracing::info!(
                             "Successfully transferred KV block from server {} to server {}",
@@ -121,6 +121,14 @@ impl KvCacheClient {
                         // 更新本地元数据：将目标服务器添加到块的 server_id 列表中
                         Self::update_kv_meta_after_migration(shared, token_hash, dst_server.id)
                             .await;
+                    } else if response.status == -1 {
+                        // KV cache 不存在，从元数据中移除该块对应的 server_id
+                        tracing::warn!(
+                            "KV cache not found on server {}, removing from metadata for token_hash {:?}",
+                            src_server.id,
+                            token_hash
+                        );
+                        shared.remove_server_from_kv_meta(token_hash, src_server.id);
                     } else {
                         fail_count += 1;
                         tracing::warn!(
@@ -133,13 +141,10 @@ impl KvCacheClient {
                 Err(e) => {
                     fail_count += 1;
                     tracing::error!(
-                        "Failed to transfer KV block from server {} to server {}: {:?}\n\
+                        "Failed to transfer KV block: {:?}\n\
                         Details: token_hash={:?}, offset={}, \n\
                         src_server=(id={}, ip={}, rpc_port={}), \n\
-                        dst_server=(id={}, ip={}, init_port={}), \n\
-                        request_url=http://{}:{}",
-                        src_server.id,
-                        dst_server.id,
+                        dst_server=(id={}, ip={}, init_port={})",
                         e,
                         token_hash,
                         offset,
@@ -149,8 +154,6 @@ impl KvCacheClient {
                         dst_server.id,
                         dst_server.ip,
                         dst_server.init_port,
-                        src_server.ip,
-                        src_server.rpc_port
                     );
                 }
             }
@@ -543,7 +546,7 @@ impl KvCacheClient {
                         "Successfully transferred from server {} to server {}, success: {}",
                         src_server.id,
                         dst_server.id,
-                        response.success
+                        response.status
                     );
 
                     // 更新本地元数据

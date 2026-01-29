@@ -24,8 +24,9 @@ message MetaServer {
 message KvBlockMeta {
     bytes token_hash = 1;               // 块哈希：固定长度 32 字节
     uint32 offset = 2;                  // token数量
-    repeated bytes next_tokens = 3;     // 下一个 token 的 32 字节哈希列表
-    repeated uint32 server_id = 4;      // 副本信息
+    bytes pre_token = 3;                // 前驱块的哈希：固定长度 32 字节（根块为全零）
+    repeated bytes next_tokens = 4;     // 后继块的 32 字节哈希列表
+    repeated uint32 server_id = 5;      // 副本信息
 }
 
 // 本地单个 block 的引用计数

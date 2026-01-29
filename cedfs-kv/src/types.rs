@@ -17,7 +17,10 @@ pub struct KvBlockMeta {
     // token数量
     pub offset: u32,
 
-    // token ids
+    // 前驱块的哈希值（根块为全零）
+    pub pre_token: [u8; 32],
+
+    // 后继块的哈希值列表
     pub next_tokens: Vec<[u8; 32]>,                                              
 
     // 副本信息

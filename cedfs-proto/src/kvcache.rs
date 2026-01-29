@@ -47,11 +47,14 @@ pub struct KvBlockMeta {
     /// token数量
     #[prost(uint32, tag = "2")]
     pub offset: u32,
-    /// 下一个 token 的 32 字节哈希列表
-    #[prost(bytes = "vec", repeated, tag = "3")]
+    /// 前驱块的哈希：固定长度 32 字节（根块为全零）
+    #[prost(bytes = "vec", tag = "3")]
+    pub pre_token: ::prost::alloc::vec::Vec<u8>,
+    /// 后继块的 32 字节哈希列表
+    #[prost(bytes = "vec", repeated, tag = "4")]
     pub next_tokens: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     /// 副本信息
-    #[prost(uint32, repeated, tag = "4")]
+    #[prost(uint32, repeated, tag = "5")]
     pub server_id: ::prost::alloc::vec::Vec<u32>,
 }
 /// 本地单个 block 的引用计数

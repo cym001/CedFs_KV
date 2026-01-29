@@ -11,6 +11,7 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
         KvBlockMeta {
             token_hash: bytes2hash(proto.token_hash),
             offset: proto.offset,
+            pre_token: bytes2hash(proto.pre_token),
             next_tokens: vecbytes2vechash(proto.next_tokens),
             server_id: proto.server_id,
         }
@@ -23,6 +24,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
         ProtoKvBlockMeta {
             token_hash: hash2bytes(internal.token_hash),
             offset: internal.offset,
+            pre_token: hash2bytes(internal.pre_token),
             next_tokens: vechash2vecbytes(internal.next_tokens),
             server_id: internal.server_id,
         }

@@ -362,6 +362,44 @@ impl Shared {
             .map(|v| v.clone())
     }
 
+    /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
+    /// 
+    /// # 参数
+    /// - `token_hash`: 块的哈希值
+    /// - `server_id`: 要移除的服务器ID
+    pub fn remove_server_from_kv_meta(&self, token_hash: [u8; 32], server_id: u32) {
+        // 更新 global_kvcache_table，移除对应的 server_id
+        let should_remove_block = if let Some(mut meta) = self.global_kvcache_table.get_mut(&token_hash) {
+            meta.server_id.retain(|&id| id != server_id);
+            meta.server_id.is_empty()
+        } else {
+            false
+        };
+
+        // 如果该块没有任何副本了，从 global_kvcache_table 中移除
+        if should_remove_block {
+            self.global_kvcache_table.remove(&token_hash);
+            tracing::info!(
+                "Removed KV block {:?} from global_kvcache_table as it has no replicas",
+                token_hash
+            );
+        }
+
+        // 生成更新操作，用于同步给其他元数据服务器
+        let update_op = UpdateKvOp {
+            token_hash,
+            operation: 2, // 删除副本操作
+            server_id,
+        };
+        self.insert_update_kvop(update_op);
+
+        tracing::debug!(
+            "Removed server_id {} from KV metadata for token_hash {:?}",
+            server_id,
+            token_hash
+        );
+    }
+
     // /// 查找或创建KV块
     // /// 返回: (token_hash, is_new, is_primary)
     // pub fn find_or_create_kv_block(
@@ -431,24 +469,26 @@ impl Shared {
     /// - `token_hash`: 待匹配的token_hash序列
     ///
     /// # 返回
-    /// - Vec<(server_id, matched_length)>: 每个server_id的最长前缀匹配长度
+    /// - Vec<(server_id, matched_token_count)>: 每个server_id匹配的token数量（offset之和）
     pub fn search_tokens(&self, token_hash: Vec<[u8; 32]>) -> Vec<(u32, u32)> {
         if token_hash.is_empty() {
             return Vec::new();
         }
 
-        // 记录每个server_id的最长匹配长度
-        let mut server_matched_lengths: HashMap<u32, u32> = HashMap::new();
+        // 记录每个server_id的匹配token总数（offset之和）
+        let mut server_matched_token_counts: HashMap<u32, u32> = HashMap::new();
         let mut current_hash = token_hash[0];
 
         // 从第一个token开始匹配
         for i in 0..token_hash.len() {
             // 查找当前hash对应的KvBlockMeta
             if let Some(meta) = self.global_kvcache_table.get(&current_hash) {
-                // 更新每个server的匹配长度
-                let current_length = (i + 1) as u32;
+                // 更新每个server的匹配token数量（累加offset）
                 for &server_id in &meta.server_id {
-                    server_matched_lengths.insert(server_id, current_length);
+                    server_matched_token_counts
+                        .entry(server_id)
+                        .and_modify(|count| *count += meta.offset)
+                        .or_insert(meta.offset);
                 }
 
                 // 如果还有下一个token需要匹配
@@ -474,23 +514,23 @@ impl Shared {
         }
 
         // 转换为Vec返回
-        server_matched_lengths.into_iter().collect()
+        server_matched_token_counts.into_iter().collect()
     }
 
-    /// 查找指定server_id的最大前缀匹配长度
+    /// 查找指定server_id的匹配token数量
     /// 
     /// # 参数
     /// - `server_id`: 服务器ID
     /// - `token_hash`: 待匹配的token_hash序列
     /// 
     /// # 返回
-    /// - 指定server_id的最大前缀匹配长度
+    /// - 指定server_id匹配的token数量（offset之和）
     pub fn search_tokens_with_server(&self, server_id: u32, token_hash: Vec<[u8; 32]>) -> u32 {
         if token_hash.is_empty() {
             return 0;
         }
 
-        let mut matched_length: u32 = 0;
+        let mut matched_token_count: u32 = 0;
         let mut current_hash = token_hash[0];
 
         // 从第一个token开始匹配
@@ -499,8 +539,8 @@ impl Shared {
             if let Some(meta) = self.global_kvcache_table.get(&current_hash) {
                 // 检查该块是否包含指定的server_id
                 if meta.server_id.contains(&server_id) {
-                    // 找到匹配，更新匹配长度
-                    matched_length = (i + 1) as u32;
+                    // 找到匹配，累加该块的offset
+                    matched_token_count += meta.offset;
                     
                     // 如果还有下一个token需要匹配
                     if i + 1 < token_hash.len() {
@@ -528,7 +568,7 @@ impl Shared {
             }
         }
 
-        matched_length
+        matched_token_count
     }
 
     
@@ -552,6 +592,13 @@ impl Shared {
         // 2. 处理未匹配的token块
         for i in matched_length..token_hash.len() {
             let current_hash = token_hash[i];
+            
+            // 确定pre_token: 如果不是第一个token，则为前一个token的hash，否则为全零（表示根块）
+            let pre_token = if i > 0 {
+                token_hash[i - 1]
+            } else {
+                [0u8; 32]
+            };
             
             // 确定next_tokens: 如果不是最后一个token，则包含下一个token的hash
             let next_tokens = if i + 1 < token_hash.len() {
@@ -600,6 +647,7 @@ impl Shared {
                 let new_meta = KvBlockMeta {
                     token_hash: current_hash,
                     offset: offset[i],
+                    pre_token,
                     next_tokens: next_tokens.clone(),
                     server_id: vec![server_id],
                 };

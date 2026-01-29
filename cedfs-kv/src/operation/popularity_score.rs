@@ -1,5 +1,9 @@
-use crate::types::{DataServer};
+use crate::types::DataServer;
 use crate::Shared;
+use std::collections::{HashMap, HashSet};
+
+/// 根块的前驱标识（全零表示没有前驱）
+const ROOT_PRE_TOKEN: [u8; 32] = [0u8; 32];
 
 pub struct PopularityScoreOp {
     pub shared: Shared,
@@ -11,7 +15,50 @@ impl PopularityScoreOp {
         self.get_instance_from_token_hash(token_hashs).await
     }
 
+    /// 计算块的链深度（从根块到当前块的距离）
+    /// 根块（pre_token 为全零的块）深度为 0
+    fn compute_chain_depth(
+        &self,
+        token_hash: &[u8; 32],
+        depth_cache: &mut HashMap<[u8; 32], u32>,
+    ) -> u32 {
+        // 检查缓存
+        if let Some(&depth) = depth_cache.get(token_hash) {
+            return depth;
+        }
+        
+        let global_kvcache_table = &self.shared.global_kvcache_table;
+        
+        // 获取块的元数据
+        let depth = if let Some(kv_meta) = global_kvcache_table.get(token_hash) {
+            if kv_meta.pre_token == ROOT_PRE_TOKEN {
+                // 根块，深度为 0
+                0
+            } else {
+                // 递归计算前驱的深度，然后加 1
+                self.compute_chain_depth(&kv_meta.pre_token, depth_cache) + 1
+            }
+        } else {
+            // 找不到元数据，视为根块
+            0
+        };
+        
+        depth_cache.insert(*token_hash, depth);
+        depth
+    }
+
     /// 获取远程引用计数中频率最大的k个token_hash，且这些token_hash至少不在一个本地dataserver中
+    /// 
+    /// 排序规则：
+    /// 1. 首先按热度（引用计数）降序排序
+    /// 2. 热度相同时，按链深度升序排序（优先选择链头部的块）
+    /// 
+    /// 设计说明：
+    /// 由于每个kv cache块在首次命中时拥有相同的热度，如果仅按热度排序，可能不会从链的首个块开始迁移。
+    /// 例如链 A→B→C→D 中，若只迁移了 B、C、D 而没有 A，查询时由于 A 不存在，整个链都无法命中。
+    /// 因此，热度相同时优先选择链深度小的块（越靠近根块），确保链前部的块优先被迁移，提高迁移后的命中率。
+    /// 
+    /// 链深度定义：从根块（pre_token 为全零的块）到当前块需要经过的边数。根块深度为 0。
     pub async fn top_k_popularity(&self, k: usize) -> Vec<[u8; 32]> {
         use std::collections::BinaryHeap;
         use std::cmp::Reverse;
@@ -21,18 +68,30 @@ impl PopularityScoreOp {
         let local_data_servers = self.shared.local_data_server_collect.read().await;
         
         // 获取所有本地dataserver的id集合
-        let local_server_ids: std::collections::HashSet<u32> = local_data_servers
+        let local_server_ids: HashSet<u32> = local_data_servers
             .iter()
             .map(|ds| ds.id)
             .collect();
         
+        // 深度缓存，避免重复计算
+        let mut depth_cache: HashMap<[u8; 32], u32> = HashMap::new();
+        
         // 使用最小堆来维护top k
-        let mut heap: BinaryHeap<Reverse<(u64, [u8; 32])>> = BinaryHeap::new();
+        // 堆元素: (count, reverse_depth, token_hash)
+        // - count: 热度（引用计数），越大越优先
+        // - reverse_depth: 链深度的反转值（u32::MAX - depth），用于在热度相同时优先选择深度小的块
+        //   深度越小表示越靠近链的根部，优先迁移可确保命中率
+        let mut heap: BinaryHeap<Reverse<(u64, u32, [u8; 32])>> = BinaryHeap::new();
         
         // 遍历全局引用计数
         for entry in global_ref_counts.iter() {
             let token_hash = *entry.key();
             let count = *entry.value();
+            
+            // 只迁移热度大于2的kv块
+            if count <= 3 {
+                continue;
+            }
             
             // 检查该token_hash是否至少不在一个本地dataserver中
             // 即：该token_hash对应的server_id不包含所有本地dataserver
@@ -48,25 +107,41 @@ impl PopularityScoreOp {
                 continue;
             }
             
+            // 计算链深度
+            let depth = self.compute_chain_depth(&token_hash, &mut depth_cache);
+            
+            // 计算reverse_depth：深度越小，reverse_depth越大，优先级越高
+            let reverse_depth = u32::MAX - depth;
+            
             // 维护大小为k的最小堆
+            // 比较顺序: 先比count，再比reverse_depth
             if heap.len() < k {
-                heap.push(Reverse((count, token_hash)));
-            } else if let Some(&Reverse((min_count, _))) = heap.peek() {
-                if count > min_count {
+                heap.push(Reverse((count, reverse_depth, token_hash)));
+            } else if let Some(&Reverse((min_count, min_reverse_depth, _))) = heap.peek() {
+                // 新元素优先级更高的条件：
+                // 1. count更大，或
+                // 2. count相同但reverse_depth更大（即depth更小）
+                if count > min_count || (count == min_count && reverse_depth > min_reverse_depth) {
                     heap.pop();
-                    heap.push(Reverse((count, token_hash)));
+                    heap.push(Reverse((count, reverse_depth, token_hash)));
                 }
             }
         }
         
-        // 从堆中提取结果并按频率降序排序
-        let mut result: Vec<(u64, [u8; 32])> = heap.into_iter()
-            .map(|Reverse(pair)| pair)
+        // 从堆中提取结果并按优先级降序排序
+        // 排序规则：先按count降序，再按depth升序（即reverse_depth降序）
+        let mut result: Vec<(u64, u32, [u8; 32])> = heap.into_iter()
+            .map(|Reverse(tuple)| tuple)
             .collect();
-        result.sort_by(|a, b| b.0.cmp(&a.0));
+        result.sort_by(|a, b| {
+            match b.0.cmp(&a.0) {
+                std::cmp::Ordering::Equal => b.1.cmp(&a.1), // reverse_depth降序 = depth升序
+                other => other,
+            }
+        });
         
         // 只返回token_hash
-        result.into_iter().map(|(_, token_hash)| token_hash).collect()
+        result.into_iter().map(|(_, _, token_hash)| token_hash).collect()
     }
     
     /// 根据token_hash获取对应的源DataServer、offset和目标DataServer

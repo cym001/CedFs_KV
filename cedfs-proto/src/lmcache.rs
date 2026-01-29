@@ -17,8 +17,8 @@ pub struct TransferKvRequest {
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct TransferKvResponse {
-    #[prost(bool, tag = "1")]
-    pub success: bool,
+    #[prost(int32, tag = "1")]
+    pub status: i32,
 }
 /// Generated client implementations.
 pub mod lmcache_server_client {
