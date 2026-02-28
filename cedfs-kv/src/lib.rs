@@ -14,6 +14,7 @@ use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
 use crate::tokenizers::TokenizerManager;
+use crate::concurrency_counter::ConcurrencyCounter;
 
 pub mod config;
 pub mod types;
@@ -25,6 +26,7 @@ pub mod network;
 pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
+pub mod concurrency_counter;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -66,6 +68,9 @@ pub struct Shared {
 
     // 节点配置
     pub config: Arc<Config>,
+
+    // 并发度统计器
+    pub concurrency_counter: Arc<ConcurrencyCounter>,
 }
 pub struct KVServer {
     pub shared: Shared,
@@ -120,6 +125,17 @@ impl KVServer {
                 let tokenizer_manager = Arc::new(
                     TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await
                 );
+
+                // 创建并发度统计器（5秒过期时间）
+                let concurrency_counter = Arc::new(ConcurrencyCounter::new(
+                    std::time::Duration::from_secs(5)
+                ));
+
+                // 启动并发度统计器的定期清理任务（每秒清理一次）
+                ConcurrencyCounter::start_cleanup_task(
+                    concurrency_counter.clone(),
+                    std::time::Duration::from_secs(1)
+                );
                 
                 let shared = Shared {
                     meta_server_collect: meta_servers,
@@ -134,6 +150,7 @@ impl KVServer {
                     update_kvop_table: Arc::new(DashMap::new()),
                     ref_count: Arc::new(RefCount::new()),
                     config: Arc::new(config),
+                    concurrency_counter,
                 };
                 tracing::info!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -669,4 +686,33 @@ impl Shared {
         true
     }
 
+    /// 获取指定 token_hash 的并发度
+    ///
+    /// # 参数
+    /// - `token_hash`: 块的哈希值
+    ///
+    /// # 返回
+    /// - 当前有效的并发度计数
+    pub fn get_kvcache_concurrency(&self, token_hash: [u8; 32]) -> usize {
+        self.concurrency_counter.get_concurrency(token_hash)
+    }
+
+    /// 获取所有 KV 块的并发度统计信息
+    ///
+    /// # 返回
+    /// - (total_entries, total_concurrency, max_concurrency):
+    ///   总条目数、总并发度、最大并发度
+    pub fn get_concurrency_statistics(&self) -> (usize, usize, usize) {
+        self.concurrency_counter.get_statistics()
+    }
+
+    /// 获取所有 token_hash 的并发度信息
+    ///
+    /// # 返回
+    /// - Vec<(token_hash, concurrency)>: 所有块的并发度信息
+    pub fn get_all_kvcache_concurrency(&self) -> Vec<([u8; 32], usize)> {
+        self.concurrency_counter.get_all_concurrency()
+    }
 }
+
+

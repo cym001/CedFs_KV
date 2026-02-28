@@ -10,7 +10,7 @@ use crate::convert::{bytes2hash, hash2bytes};
 use crate::operation::move_kvreplica::MoveKVReplicaOp;
 use crate::operation::popularity_score::PopularityScoreOp;
 use crate::operation::transfer_kv::TransferKvOp;
-use crate::types::{DataServer, MetaServer, UpdateKvOp};
+use crate::types::{DataServer, MetaServer};
 use crate::Shared;
 
 pub struct KvCacheClient {
@@ -52,6 +52,24 @@ impl KvCacheClient {
         let migration_interval = self.shared.config.replica_pull_interval;
         let shared = self.shared.clone();
 
+        // 启动跨域迁移任务
+        tokio::spawn(async move {
+            // 首次执行前等待一个间隔周期，让系统先完成初始化
+            let mut ticker = interval(Duration::from_secs(migration_interval*5));
+            ticker.tick().await; // 跳过首次立即执行
+
+            loop {
+                ticker.tick().await;
+                tracing::info!("Starting scheduled cross-domain KV migration task");
+                
+                if let Err(e) = Self::cross_domain_kv_migration(&shared).await {
+                    tracing::error!("Cross-domain KV migration error: {:?}", e);
+                }
+            }
+        });
+
+        // 启动域内迁移任务
+        let shared_intra = self.shared.clone();
         tokio::spawn(async move {
             // 首次执行前等待一个间隔周期，让系统先完成初始化
             let mut ticker = interval(Duration::from_secs(migration_interval));
@@ -59,18 +77,18 @@ impl KvCacheClient {
 
             loop {
                 ticker.tick().await;
-                tracing::info!("Starting scheduled KV migration task");
+                tracing::info!("Starting scheduled intra-domain KV migration task");
                 
-                if let Err(e) = Self::execute_kv_migration(&shared).await {
-                    tracing::error!("KV migration error: {:?}", e);
+                if let Err(e) = Self::intra_domain_kv_migration(&shared_intra).await {
+                    tracing::error!("Intra-domain KV migration error: {:?}", e);
                 }
             }
         });
     }
 
-    /// 执行 KV 迁移操作
-    async fn execute_kv_migration(shared: &Shared) -> anyhow::Result<()> {
-        // 获取需要迁移的 KV 块
+    /// 执行跨域 KV 迁移操作
+    async fn cross_domain_kv_migration(shared: &Shared) -> anyhow::Result<()> {
+        // 获取需要迁移的 KV 块（跨域迁移，基于热度）
         let transfer_items = PopularityScoreOp {
             shared: shared.clone(),
         }
@@ -78,7 +96,7 @@ impl KvCacheClient {
         .await;
 
         if transfer_items.is_empty() {
-            tracing::debug!("No KV blocks need migration");
+            tracing::debug!("No KV blocks need cross-domain migration");
             return Ok(());
         }
 
@@ -87,6 +105,43 @@ impl KvCacheClient {
             transfer_items.len()
         );
 
+        Self::execute_kv_migration(shared, transfer_items, "cross-domain").await
+    }
+
+    /// 执行域内 KV 迁移操作
+    async fn intra_domain_kv_migration(shared: &Shared) -> anyhow::Result<()> {
+        // 获取需要迁移的 KV 块（域内迁移，基于并发度）
+        let k = shared.config.replica_pull_count as usize;
+        let transfer_items = PopularityScoreOp {
+            shared: shared.clone(),
+        }
+        .intra_domain_transfer_candidate(k)
+        .await;
+
+        if transfer_items.is_empty() {
+            tracing::debug!("No KV blocks need intra-domain migration");
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Found {} KV blocks to migrate within domain based on concurrency",
+            transfer_items.len()
+        );
+
+        Self::execute_kv_migration(shared, transfer_items, "intra-domain").await
+    }
+
+    /// 执行 KV 块迁移的通用逻辑
+    /// 
+    /// # 参数
+    /// - `shared`: 共享状态
+    /// - `transfer_items`: 要迁移的块列表 (token_hash, offset, source_server, target_server)
+    /// - `migration_type`: 迁移类型标识（用于日志），如 "cross-domain" 或 "intra-domain"
+    async fn execute_kv_migration(
+        shared: &Shared,
+        transfer_items: Vec<([u8; 32], u32, DataServer, DataServer)>,
+        migration_type: &str,
+    ) -> anyhow::Result<()> {
         let mut success_count = 0;
         let mut fail_count = 0;
 
@@ -113,7 +168,8 @@ impl KvCacheClient {
                     if response.status > 0 {
                         success_count += 1;
                         tracing::info!(
-                            "Successfully transferred KV block from server {} to server {}",
+                            "Successfully transferred KV block ({}) from server {} to server {}",
+                            migration_type,
                             src_server.id,
                             dst_server.id
                         );
@@ -141,10 +197,11 @@ impl KvCacheClient {
                 Err(e) => {
                     fail_count += 1;
                     tracing::error!(
-                        "Failed to transfer KV block: {:?}\n\
+                        "Failed to transfer KV block ({}): {:?}\n\
                         Details: token_hash={:?}, offset={}, \n\
                         src_server=(id={}, ip={}, rpc_port={}), \n\
                         dst_server=(id={}, ip={}, init_port={})",
+                        migration_type,
                         e,
                         token_hash,
                         offset,
@@ -160,7 +217,8 @@ impl KvCacheClient {
         }
 
         tracing::info!(
-            "KV migration task completed: {} succeeded, {} failed",
+            "{} KV migration task completed: {} succeeded, {} failed",
+            migration_type,
             success_count,
             fail_count
         );

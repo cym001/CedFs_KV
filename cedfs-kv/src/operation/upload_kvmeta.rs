@@ -32,6 +32,10 @@ impl UploadKvMetaOp {
 
         self.shared.create_new_kvblock(self.server_id, offsets.clone(), tokens_hash.clone());
         self.shared.ref_count.batch_increment_local_incremental_count(&tokens_hash, 1);
+
+        // 更新并发度统计
+        self.shared.concurrency_counter.batch_increment(&tokens_hash);
+        tracing::debug!("UploadKvMetaOp: Incremented concurrency for {} blocks", tokens_hash.len());
         
         // 输出哈希值和偏移量信息
         // tracing::info!(
