@@ -15,6 +15,7 @@ use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
 use crate::tokenizers::TokenizerManager;
 use crate::concurrency_counter::ConcurrencyCounter;
+use crate::http::controller::inference_load_tracker::InferenceLoadTracker;
 
 pub mod config;
 pub mod types;
@@ -27,6 +28,7 @@ pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
 pub mod concurrency_counter;
+pub mod http;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -71,6 +73,9 @@ pub struct Shared {
 
     // 并发度统计器
     pub concurrency_counter: Arc<ConcurrencyCounter>,
+
+    // 推理实例未完成请求长度总和（用于最小负载调度）
+    pub inference_load_tracker: Arc<InferenceLoadTracker>,
 }
 pub struct KVServer {
     pub shared: Shared,
@@ -151,6 +156,7 @@ impl KVServer {
                     ref_count: Arc::new(RefCount::new()),
                     config: Arc::new(config),
                     concurrency_counter,
+                    inference_load_tracker: Arc::new(InferenceLoadTracker::new()),
                 };
                 tracing::info!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })

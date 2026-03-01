@@ -79,6 +79,13 @@ impl RegisterInstanceOp {
             self.data_server.model_name,
             meta_server_id
         );
+
+        // 4.将data_server_id加入inference_load_tracker中
+        // self.shared.inference_load_tracker.add_instance(data_server_id);
+        // tracing::info!(
+        //     "Added data_server {} to inference_load_tracker",
+        //     data_server_id
+        // );
         
         Ok(())
     }

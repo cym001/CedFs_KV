@@ -15,5 +15,8 @@ prost = { workspace = true }
 serde = { workspace = true }
 tonic = { workspace = true }
 
+axum = { version = "0.8", features = ["multipart"], optional = true }
+axum-server = { version = "0.6", features = ["tls-rustls"] }
+
 [build-dependencies]
 tonic-build = { workspace = true }
