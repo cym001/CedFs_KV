@@ -55,7 +55,7 @@ impl KvCacheClient {
         // 启动跨域迁移任务
         tokio::spawn(async move {
             // 首次执行前等待一个间隔周期，让系统先完成初始化
-            let mut ticker = interval(Duration::from_secs(migration_interval*5));
+            let mut ticker = interval(Duration::from_secs(migration_interval));
             ticker.tick().await; // 跳过首次立即执行
 
             loop {
@@ -69,21 +69,21 @@ impl KvCacheClient {
         });
 
         // 启动域内迁移任务
-        let shared_intra = self.shared.clone();
-        tokio::spawn(async move {
-            // 首次执行前等待一个间隔周期，让系统先完成初始化
-            let mut ticker = interval(Duration::from_secs(migration_interval));
-            ticker.tick().await; // 跳过首次立即执行
+        // let shared_intra = self.shared.clone();
+        // tokio::spawn(async move {
+        //     // 首次执行前等待一个间隔周期，让系统先完成初始化
+        //     let mut ticker = interval(Duration::from_secs(migration_interval));
+        //     ticker.tick().await; // 跳过首次立即执行
 
-            loop {
-                ticker.tick().await;
-                tracing::info!("Starting scheduled intra-domain KV migration task");
+        //     loop {
+        //         ticker.tick().await;
+        //         tracing::info!("Starting scheduled intra-domain KV migration task");
                 
-                if let Err(e) = Self::intra_domain_kv_migration(&shared_intra).await {
-                    tracing::error!("Intra-domain KV migration error: {:?}", e);
-                }
-            }
-        });
+        //         if let Err(e) = Self::intra_domain_kv_migration(&shared_intra).await {
+        //             tracing::error!("Intra-domain KV migration error: {:?}", e);
+        //         }
+        //     }
+        // });
     }
 
     /// 执行跨域 KV 迁移操作

@@ -27,6 +27,20 @@ impl Drop for InferenceLoadGuard {
     }
 }
 
+/// 请求结束时自动对本次涉及的 token_hashes 做 concurrency_counter 扣减
+struct TokenConcurrencyGuard {
+    shared: Arc<Shared>,
+    token_hashes: Vec<[u8; 32]>,
+}
+
+impl Drop for TokenConcurrencyGuard {
+    fn drop(&mut self) {
+        for &h in &self.token_hashes {
+            self.shared.concurrency_counter.decrement(h);
+        }
+    }
+}
+
 /// 客户端 POST 的 JSON 请求体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferRequest {
@@ -97,7 +111,13 @@ pub async fn infer(
     )
     .await
     {
-        Some(s) => s,
+        Some(s) => {
+            info!(
+                "infer schedule selected server_id={} url={} model={}",
+                s.id, s.url, s.model_name
+            );
+            s
+        }
         None => {
             warn!(
                 "no data server available for model={}, prompt_len={}",
@@ -122,6 +142,31 @@ pub async fn infer(
         tracker: shared.inference_load_tracker.clone(),
         server_key: server.id,
         prompt_len,
+    };
+
+    
+    // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
+    let token_hashes = shared
+        .get_token_hashes_for_prompt(&payload.model, &payload.prompt)
+        .await;
+    let _token_guard = if let Some(ref hashes) = token_hashes {
+        if !hashes.is_empty() {
+            let replica_counts = shared.get_replica_counts(hashes.clone());
+            let items: Vec<([u8; 32], u32)> = hashes
+                .iter()
+                .zip(replica_counts.iter())
+                .map(|(&h, &r)| (h, r))
+                .collect();
+            shared.increment_concurrency_and_maybe_migrate(&items);
+            Some(TokenConcurrencyGuard {
+                shared: shared.clone(),
+                token_hashes: hashes.clone(),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
     };
 
     //todo()错误处理

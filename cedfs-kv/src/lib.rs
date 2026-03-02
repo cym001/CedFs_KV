@@ -16,6 +16,7 @@ use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
 use crate::tokenizers::TokenizerManager;
 use crate::concurrency_counter::ConcurrencyCounter;
 use crate::http::controller::inference_load_tracker::InferenceLoadTracker;
+use crate::operation::transfer_kv::TransferKvOp;
 
 pub mod config;
 pub mod types;
@@ -132,9 +133,7 @@ impl KVServer {
                 );
 
                 // 创建并发度统计器（5秒过期时间）
-                let concurrency_counter = Arc::new(ConcurrencyCounter::new(
-                    std::time::Duration::from_secs(5)
-                ));
+                let concurrency_counter = Arc::new(ConcurrencyCounter::new());
 
                 // 启动并发度统计器的定期清理任务（每秒清理一次）
                 ConcurrencyCounter::start_cleanup_task(
@@ -385,6 +384,45 @@ impl Shared {
             .map(|v| v.clone())
     }
 
+    /// 根据 token_hash 列表返回各块在 global_kvcache_table 中的副本数（server_id.len()），不存在则为 0
+    pub fn get_replica_counts(&self, token_hashes: Vec<[u8; 32]>) -> Vec<u32> {
+        token_hashes
+            .iter()
+            .map(|h| {
+                self.global_kvcache_table
+                    .get(h)
+                    .map(|meta| meta.server_id.len() as u32)
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+
+    /// 对指定 model 和 prompt 编码得到 token_hashes（与 SearchKvByPromptsOp::search_one_prompt_one_model 逻辑一致）
+    pub async fn get_token_hashes_for_prompt(
+        &self,
+        model: &str,
+        prompt: &str,
+    ) -> Option<Vec<[u8; 32]>> {
+        let token_list = self
+            .tokenizer_manager
+            .encode_async(model, prompt)
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to encode prompt with model '{}': {}", model, e);
+            })
+            .ok()?;
+        if token_list.is_empty() {
+            return None;
+        }
+        let token_hashes = self
+            .hasher
+            .hash_tokens_with_blocks_all(&token_list, self.config.block_size)
+            .iter()
+            .map(|(hash, _offset)| hash.to_u256())
+            .collect();
+        Some(token_hashes)
+    }
+
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
     /// 
     /// # 参数
@@ -602,27 +640,33 @@ impl Shared {
     /// - `token_hash`: token_hash序列
     /// 
     /// # 返回
-    /// - `true`: 成功创建或更新
-    /// - `false`: 失败
-    pub fn create_new_kvblock(&self, server_id: u32, offset: Vec<u32>, token_hash: Vec<[u8; 32]>) -> bool {
+    /// - `Some(vec)`: 成功，vec 为本次涉及的各块的 (token_hash, 副本数)
+    /// - `None`: token_hash 为空，未做任何修改
+    pub fn create_new_kvblock(
+        &self,
+        server_id: u32,
+        offset: Vec<u32>,
+        token_hash: Vec<[u8; 32]>,
+    ) -> Option<Vec<([u8; 32], u32)>> {
         if token_hash.is_empty() {
-            return false;
+            return None;
         }
 
         // 1. 查找当前server_id的最大前缀匹配长度
         let matched_length = self.search_tokens_with_server(server_id, token_hash.clone()) as usize;
+        let mut replica_counts = Vec::with_capacity(token_hash.len() - matched_length);
 
         // 2. 处理未匹配的token块
         for i in matched_length..token_hash.len() {
             let current_hash = token_hash[i];
-            
+
             // 确定pre_token: 如果不是第一个token，则为前一个token的hash，否则为全零（表示根块）
             let pre_token = if i > 0 {
                 token_hash[i - 1]
             } else {
                 [0u8; 32]
             };
-            
+
             // 确定next_tokens: 如果不是最后一个token，则包含下一个token的hash
             let next_tokens = if i + 1 < token_hash.len() {
                 vec![token_hash[i + 1]]
@@ -636,14 +680,14 @@ impl Shared {
                 if !existing_meta.server_id.contains(&server_id) {
                     // server_id不同，需要更新
                     existing_meta.server_id.push(server_id);
-                    
+
                     // 合并next_tokens（去重）
                     for &next_token in &next_tokens {
                         if !existing_meta.next_tokens.contains(&next_token) {
                             existing_meta.next_tokens.push(next_token);
                         }
                     }
-                    
+
                     // 生成UpdateKvOp
                     let update_op = UpdateKvOp {
                         token_hash: current_hash,
@@ -651,11 +695,15 @@ impl Shared {
                         server_id,
                     };
                     self.insert_update_kvop(update_op);
-                    
+
+                    let replica_count = existing_meta.server_id.len() as u32;
+                    replica_counts.push((current_hash, replica_count));
+
                     tracing::debug!(
-                        "Updated existing KvBlockMeta for token_hash {:?}, added server_id {}",
+                        "Updated existing KvBlockMeta for token_hash {:?}, added server_id {}, replica_count {}",
                         current_hash,
-                        server_id
+                        server_id,
+                        replica_count
                     );
                 } else {
                     // server_id已存在，只需要更新next_tokens
@@ -664,6 +712,8 @@ impl Shared {
                             existing_meta.next_tokens.push(next_token);
                         }
                     }
+                    let replica_count = existing_meta.server_id.len() as u32;
+                    replica_counts.push((current_hash, replica_count));
                 }
             } else {
                 // 不存在相同hash的块，创建新的KvBlockMeta
@@ -674,22 +724,24 @@ impl Shared {
                     next_tokens: next_tokens.clone(),
                     server_id: vec![server_id],
                 };
-                
+
                 // 插入到global_kvcache_table
                 self.insert_global_kvcache(new_meta.clone());
-                
+
                 // 插入到update_kvmeta_table
                 self.insert_update_kvcache(new_meta);
-                
+
+                replica_counts.push((current_hash, 1));
+
                 tracing::debug!(
-                    "Created new KvBlockMeta for token_hash {:?}, server_id {}",
+                    "Created new KvBlockMeta for token_hash {:?}, server_id {}, replica_count 1",
                     current_hash,
                     server_id
                 );
             }
         }
 
-        true
+        Some(replica_counts)
     }
 
     /// 获取指定 token_hash 的并发度
@@ -718,6 +770,116 @@ impl Shared {
     /// - Vec<(token_hash, concurrency)>: 所有块的并发度信息
     pub fn get_all_kvcache_concurrency(&self) -> Vec<([u8; 32], usize)> {
         self.concurrency_counter.get_all_concurrency()
+    }
+
+    pub async fn intra_domain_transfer(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Option<([u8; 32], u32, DataServer, DataServer)> {
+        let global_kvcache_table = &self.global_kvcache_table;
+        let local_data_servers = self.local_data_server_collect.read().await;
+
+        let kv_meta = global_kvcache_table.get(token_hash)?;
+        let offset = kv_meta.offset;
+
+        let source = local_data_servers
+            .iter()
+            .find(|ds| kv_meta.server_id.contains(&ds.id))?;
+        let target = local_data_servers
+            .iter()
+            .find(|ds| !kv_meta.server_id.contains(&ds.id))?;
+
+        tracing::info!(
+            "Intra-domain transfer: token_hash {:?}, replicas: {}, source: {}, target: {}",
+            token_hash,
+            kv_meta.server_id.len(),
+            source.id,
+            target.id
+        );
+        Some((*token_hash, offset, source.clone(), target.clone()))
+    }
+
+    /// 执行单次 KV 块迁移（与 client 中 execute_kv_migration 单条逻辑一致）
+    pub async fn execute_single_kv_migration(
+        &self,
+        (token_hash, offset, src_server, dst_server): ([u8; 32], u32, DataServer, DataServer),
+    ) -> anyhow::Result<()> {
+        let url = format!("http://{}:{}", src_server.ip, src_server.rpc_port);
+        let client = TransferKvOp::new(&url);
+        let position = "LocalCPUBackend".to_string();
+        let response = client
+            .send_transfer_request(
+                token_hash,
+                position,
+                vec![offset],
+                dst_server.ip.to_string(),
+                dst_server.init_port as i32,
+                true,
+            )
+            .await?;
+        if response.status > 0 {
+            self.update_kv_meta_after_migration(token_hash, dst_server.id)
+                .await;
+            tracing::info!(
+                "Successfully transferred KV block (concurrency-triggered) from server {} to server {}",
+                src_server.id,
+                dst_server.id
+            );
+        } else if response.status == -1 {
+            tracing::warn!(
+                "KV cache not found on server {}, removing from metadata for token_hash {:?}",
+                src_server.id,
+                token_hash
+            );
+            self.remove_server_from_kv_meta(token_hash, src_server.id);
+        }
+        Ok(())
+    }
+
+    /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
+    async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
+        if let Some(mut meta) = self.global_kvcache_table.get_mut(&token_hash) {
+            if !meta.server_id.contains(&new_server_id) {
+                meta.server_id.push(new_server_id);
+            }
+        }
+        let _ = self.insert_local_kvcache(token_hash).await;
+        self.ref_count.increment_local_ref_count(token_hash, 1);
+        let update_op = UpdateKvOp {
+            token_hash,
+            operation: 1,
+            server_id: new_server_id,
+        };
+        self.insert_update_kvop(update_op);
+    }
+
+    /// 若 concurrent_count > replica_count*2 时，可调用此方法：对单个 token_hash 尝试域内迁移并执行
+    pub async fn try_trigger_intra_domain_migration_for_token(
+        &self,
+        token_hash: [u8; 32],
+    ) {
+        if let Some(transfer_item) = self.intra_domain_transfer(&token_hash).await {
+            if let Err(e) = self.execute_single_kv_migration(transfer_item).await {
+                tracing::warn!(
+                    "Concurrency-triggered intra-domain migration failed for token_hash {:?}: {:?}",
+                    token_hash,
+                    e
+                );
+            }
+        }
+    }
+
+    /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移
+    pub fn increment_concurrency_and_maybe_migrate(&self, items: &[([u8; 32], u32)]) {
+        let to_migrate = self.concurrency_counter.batch_increment(items);
+        for token_hash in to_migrate {
+            let shared = self.clone();
+            tokio::spawn(async move {
+                shared
+                    .try_trigger_intra_domain_migration_for_token(token_hash)
+                    .await;
+            });
+        }
     }
 }
 

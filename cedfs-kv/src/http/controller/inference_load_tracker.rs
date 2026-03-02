@@ -59,5 +59,10 @@ impl InferenceLoadTracker {
         selected
     }
 
-        
+    /// 注册新实例（以 data_server_id 为 key，初始负载为 0），便于后续参与负载均衡
+    pub fn add_instance(&self, data_server_id: u32) {
+        self.loads
+            .entry(data_server_id)
+            .or_insert_with(|| AtomicU64::new(0));
+    }
 }
