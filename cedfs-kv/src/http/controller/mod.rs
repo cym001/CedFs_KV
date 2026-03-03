@@ -44,7 +44,19 @@ impl Drop for TokenConcurrencyGuard {
 /// 客户端 POST 的 JSON 请求体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferRequest {
-    /// 模型路径或名称
+    /// 模型名称
+    pub model_name: String,
+    /// 模型路径
+    pub model_path: String,
+    /// 输入 prompt
+    pub prompt: String,
+    /// 最大生成 token 数
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceInferRequest {
+    /// 模型路径
     pub model: String,
     /// 输入 prompt
     pub prompt: String,
@@ -99,15 +111,15 @@ pub async fn infer(
 ) -> Result<Json<InferResponse>, (StatusCode, Json<InferResponse>)> {
     let prompt_len = payload.prompt.len();
     info!(
-        "infer request: model={}, prompt_len={}, max_tokens={}",
-        payload.model, prompt_len, payload.max_tokens
+        "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
+        payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
 
     // 选取当前未完成推理请求长度总和最小的实例
     let server = match scheduler::select_server(
         &shared.local_data_server_collect,
         &shared.inference_load_tracker,
-        Some(payload.model.as_str()),
+        Some(payload.model_name.as_str()),
     )
     .await
     {
@@ -121,7 +133,7 @@ pub async fn infer(
         None => {
             warn!(
                 "no data server available for model={}, prompt_len={}",
-                payload.model, prompt_len
+                payload.model_name, prompt_len
             );
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -147,7 +159,7 @@ pub async fn infer(
     
     // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
     let token_hashes = shared
-        .get_token_hashes_for_prompt(&payload.model, &payload.prompt)
+        .get_token_hashes_for_prompt(&payload.model_name, &payload.prompt)
         .await;
     let _token_guard = if let Some(ref hashes) = token_hashes {
         if !hashes.is_empty() {
@@ -186,9 +198,14 @@ pub async fn infer(
             )
         })?;
 
+    let instance_payload = InstanceInferRequest {
+        model: payload.model_path.clone(),
+        prompt: payload.prompt.clone(),
+        max_tokens: payload.max_tokens,
+    };
     let response = client
         .post(&url)
-        .json(&payload)
+        .json(&instance_payload)
         .send()
         .await
         .map_err(|e| {

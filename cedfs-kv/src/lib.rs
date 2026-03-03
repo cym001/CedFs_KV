@@ -585,7 +585,7 @@ impl Shared {
     /// - `token_hash`: 待匹配的token_hash序列
     /// 
     /// # 返回
-    /// - 指定server_id匹配的token数量（offset之和）
+    /// - 指定server_id匹配的token_hash数量
     pub fn search_tokens_with_server(&self, server_id: u32, token_hash: Vec<[u8; 32]>) -> u32 {
         if token_hash.is_empty() {
             return 0;
@@ -600,8 +600,8 @@ impl Shared {
             if let Some(meta) = self.global_kvcache_table.get(&current_hash) {
                 // 检查该块是否包含指定的server_id
                 if meta.server_id.contains(&server_id) {
-                    // 找到匹配，累加该块的offset
-                    matched_token_count += meta.offset;
+                    // 找到匹配，累加1
+                    matched_token_count += 1;
                     
                     // 如果还有下一个token需要匹配
                     if i + 1 < token_hash.len() {
