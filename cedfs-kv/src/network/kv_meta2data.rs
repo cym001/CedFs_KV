@@ -22,7 +22,7 @@ impl KvMeta2Data for KvCacheDataService{
         &self,
         request: Request<UploadKvMetaRequest>,
     ) -> Result<Response<UploadKvMetaResponse>, Status> {
-        tracing::info!("upload_kv_meta request received");
+        tracing::debug!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = UploadKvMetaOp {
             server_id: req.server_id,
@@ -39,7 +39,7 @@ impl KvMeta2Data for KvCacheDataService{
     async fn register_instance(&self,
         request: Request<RegisterInstanceRequest>,
     ) -> Result<Response<RegisterInstanceResponse>, Status>{
-        tracing::info!("register_instance request received");
+        tracing::debug!("register_instance request received");
         let _req = request.into_inner();
         let _op = crate::operation::register_instance::RegisterInstanceOp{
             data_server: _req.data_server.unwrap().into(),
@@ -57,7 +57,7 @@ impl KvMeta2Data for KvCacheDataService{
         &self,
         request: Request<RemoveKvMetaRequest>,
     ) -> Result<Response<RemoveKvMetaResponse>, Status> {
-        tracing::info!("upload_kv_meta request received");
+        tracing::debug!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = RemoveKvMetaOp {
             remove_nums: req.remove_nums,

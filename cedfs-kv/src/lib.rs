@@ -77,6 +77,9 @@ pub struct Shared {
 
     // 推理实例未完成请求长度总和（用于最小负载调度）
     pub inference_load_tracker: Arc<InferenceLoadTracker>,
+
+    // 近期迁移记录，防止同一 token 在短时间内重复迁移
+    pub recent_migrations: Arc<DashMap<[u8; 32], std::time::Instant>>,
 }
 pub struct KVServer {
     pub shared: Shared,
@@ -156,6 +159,7 @@ impl KVServer {
                     config: Arc::new(config),
                     concurrency_counter,
                     inference_load_tracker: Arc::new(InferenceLoadTracker::new()),
+                    recent_migrations: Arc::new(DashMap::new()),
                 };
                 tracing::info!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -191,6 +195,16 @@ impl KVServer {
 }
 
 impl Shared {
+    /// 将 token_hash 转为 16 进制字符串（无 0x 前缀）
+    fn token_hash_to_hex(token_hash: &[u8; 32]) -> String {
+        let mut s = String::with_capacity(64);
+        for b in token_hash {
+            use std::fmt::Write as _;
+            let _ = write!(&mut s, "{:02x}", b);
+        }
+        s
+    }
+
     /// 插入本地 KV 索引
     ///
     /// # 参数
@@ -789,9 +803,10 @@ impl Shared {
             .iter()
             .find(|ds| !kv_meta.server_id.contains(&ds.id))?;
 
+        let hex = Shared::token_hash_to_hex(token_hash);
         tracing::info!(
-            "Intra-domain transfer: token_hash {:?}, replicas: {}, source: {}, target: {}",
-            token_hash,
+            "Intra-domain transfer: token_hash 0x{}, replicas: {}, source: {}, target: {}",
+            hex,
             kv_meta.server_id.len(),
             source.id,
             target.id
@@ -860,25 +875,51 @@ impl Shared {
     ) {
         if let Some(transfer_item) = self.intra_domain_transfer(&token_hash).await {
             if let Err(e) = self.execute_single_kv_migration(transfer_item).await {
+                let hex = Shared::token_hash_to_hex(&token_hash);
                 tracing::warn!(
-                    "Concurrency-triggered intra-domain migration failed for token_hash {:?}: {:?}",
-                    token_hash,
+                    "Concurrency-triggered intra-domain migration failed for token_hash 0x{}: {:?}",
+                    hex,
                     e
                 );
             }
         }
     }
 
-    /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移
+    /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移。
+    /// 为避免抖动，对同一 token_hash 在短时间内的重复迁移会被抑制。
     pub fn increment_concurrency_and_maybe_migrate(&self, items: &[([u8; 32], u32)]) {
         let to_migrate = self.concurrency_counter.batch_increment(items);
+        let now = std::time::Instant::now();
+        let cooldown = std::time::Duration::from_secs(5);
+
         for token_hash in to_migrate {
-            let shared = self.clone();
-            tokio::spawn(async move {
-                shared
-                    .try_trigger_intra_domain_migration_for_token(token_hash)
-                    .await;
-            });
+            let mut should_spawn = false;
+
+            if let Some(mut entry) = self.recent_migrations.get_mut(&token_hash) {
+                // 已有迁移记录，检查是否超过冷却时间
+                if now.duration_since(*entry) >= cooldown {
+                    *entry = now;
+                    should_spawn = true;
+                }
+            } else {
+                // 首次迁移该 token_hash，记录时间并允许迁移
+                self.recent_migrations.insert(token_hash, now);
+                should_spawn = true;
+            }
+
+            if should_spawn {
+                let hex = Shared::token_hash_to_hex(&token_hash);
+                tracing::info!(
+                    "Concurrency-triggered intra-domain migration scheduled for token_hash 0x{}",
+                    hex
+                );
+                let shared = self.clone();
+                tokio::spawn(async move {
+                    shared
+                        .try_trigger_intra_domain_migration_for_token(token_hash)
+                        .await;
+                });
+            }
         }
     }
 }

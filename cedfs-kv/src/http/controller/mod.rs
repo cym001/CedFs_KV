@@ -116,12 +116,31 @@ pub async fn infer(
     );
 
     // 选取当前未完成推理请求长度总和最小的实例
-    let server = match scheduler::select_server(
-        &shared.local_data_server_collect,
-        &shared.inference_load_tracker,
-        Some(payload.model_name.as_str()),
-    )
-    .await
+    // let server = match scheduler::select_server_by_workload(&shared, payload.model_name.as_str()).await
+    // {
+    //     Some(s) => {
+    //         info!(
+    //             "infer schedule selected server_id={} url={} model={}",
+    //             s.id, s.url, s.model_name
+    //         );
+    //         s
+    //     }
+    //     None => {
+    //         warn!(
+    //             "no data server available for model={}, prompt_len={}",
+    //             payload.model_name, prompt_len
+    //         );
+    //         return Err((
+    //             StatusCode::SERVICE_UNAVAILABLE,
+    //             Json(InferResponse {
+    //                 success: false,
+    //                 result: None,
+    //                 error: Some("no data server available for this model".to_string()),
+    //             }),
+    //         ));
+    //     }
+    // };
+    let server = match scheduler::select_server_by_kvcache(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
         Some(s) => {
             info!(
@@ -158,6 +177,7 @@ pub async fn infer(
 
     
     // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
+    // todo(重复调用)
     let token_hashes = shared
         .get_token_hashes_for_prompt(&payload.model_name, &payload.prompt)
         .await;
