@@ -46,7 +46,7 @@ impl UploadKvMetaOp {
         //     offsets,
         //     tokens_hash.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
         // );
-        tracing::info!(
+        tracing::debug!(
             "Upload KV metadata - server_id: {}, blocks: {}",
             self.server_id,
             hash_results.len()

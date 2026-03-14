@@ -166,7 +166,7 @@ impl KVServer {
                     inference_load_tracker: Arc::new(InferenceLoadTracker::new()),
                     recent_migrations: Arc::new(DashMap::new()),
                 };
-                tracing::info!("Loaded config: {:?}", shared.config);
+                tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
             },
             Err(e) => {
@@ -720,6 +720,10 @@ impl Shared {
                 if !existing_meta.server_id.contains(&server_id) {
                     // server_id不同，需要更新
                     existing_meta.server_id.push(server_id);
+                    self.local_kv_cache_block_count
+                        .entry(server_id)
+                        .or_insert_with(|| AtomicUsize::new(0))
+                        .fetch_add(1, Ordering::Relaxed);
 
                     // 合并next_tokens（去重）
                     for &next_token in &next_tokens {
@@ -764,6 +768,11 @@ impl Shared {
                     next_tokens: next_tokens.clone(),
                     server_id: vec![server_id],
                 };
+
+                self.local_kv_cache_block_count
+                    .entry(server_id)
+                    .or_insert_with(|| AtomicUsize::new(0))
+                    .fetch_add(1, Ordering::Relaxed);
 
                 // 插入到global_kvcache_table
                 self.insert_global_kvcache(new_meta.clone());

@@ -19,7 +19,23 @@ use futures_util::StreamExt;
 use std::time::Instant;
 
 use inference_load_tracker::InferenceLoadTracker;
+use scheduler::Scheduler;
 use crate::Shared;
+
+#[derive(Clone)]
+pub struct ControllerState {
+    pub shared: Arc<Shared>,
+    pub scheduler: Arc<Scheduler>,
+}
+
+impl ControllerState {
+    pub fn new(shared: Arc<Shared>) -> Self {
+        Self {
+            shared,
+            scheduler: Arc::new(Scheduler::new()),
+        }
+    }
+}
 
 /// 请求结束时自动从该实例减去本次 prompt 长度，避免遗漏
 struct InferenceLoadGuard {
@@ -151,9 +167,10 @@ pub struct PerformanceResponse {
 
 /// POST /infer：接收 { model, prompt, max_tokens }，按各实例当前未完成请求长度总和最小做负载均衡，转发并返回 JSON
 pub async fn infer(
-    State(shared): State<Arc<Shared>>,
+    State(state): State<Arc<ControllerState>>,
     Json(payload): Json<InferRequest>,
 ) -> Result<Json<InferResponse>, (StatusCode, Json<InferResponse>)> {
+    let shared = &state.shared;
     let prompt_len = payload.prompt.len();
     info!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
@@ -185,14 +202,14 @@ pub async fn infer(
     //         ));
     //     }
     // };
-    let server = match scheduler::select_server_by_kvcache(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, token_hashes) = match state.scheduler.select_server_by_kvcache(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
-        Some(s) => {
+        Some((s, hashes)) => {
             info!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
-            s
+            (s, hashes)
         }
         None => {
             warn!(
@@ -220,12 +237,7 @@ pub async fn infer(
         prompt_len,
     };
 
-    
-    // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    // todo(重复调用)
-    let token_hashes = shared
-        .get_token_hashes_for_prompt(&payload.model_name, &payload.prompt)
-        .await;
+    // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
     let _token_guard = if let Some(ref hashes) = token_hashes {
         if !hashes.is_empty() {
             let replica_counts = shared.get_replica_counts(hashes.clone());
@@ -316,22 +328,23 @@ pub async fn infer(
 }
 
 pub async fn performance(
-    State(shared): State<Arc<Shared>>,
+    State(state): State<Arc<ControllerState>>,
     Json(payload): Json<PerformanceRequest>,
 ) -> Result<Json<PerformanceResponse>, (StatusCode, Json<PerformanceResponse>)> {
+    let shared = &state.shared;
     let prompt_len = payload.prompt.len();
     info!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
         payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
-    let server = match scheduler::select_server_by_kvcache(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, token_hashes) = match state.scheduler.select_server_hybrid(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
-        Some(s) => {
+        Some((s, hashes)) => {
             info!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
-            s
+            (s, hashes)
         }
         None => {
             warn!(
@@ -365,11 +378,7 @@ pub async fn performance(
         prompt_len,
     };
 
-    // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    // todo(重复调用)
-    let token_hashes = shared
-        .get_token_hashes_for_prompt(&payload.model_name, &payload.prompt)
-        .await;
+    // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
     let _token_guard = if let Some(ref hashes) = token_hashes {
         if !hashes.is_empty() {
             let replica_counts = shared.get_replica_counts(hashes.clone());
@@ -429,8 +438,10 @@ pub async fn performance(
 
     let start_time = Instant::now();
 
+    // first_token_time：仅在收到第一个非空 token 时赋值一次
+    // last_token_time：仅在循环结束后根据最后一次记录的时刻赋值，不在循环内反复写
     let mut first_token_time: Option<Instant> = None;
-    let mut last_token_time: Option<Instant> = None;
+    let mut last_text_token_time: Option<Instant> = None;
 
     let mut response_text = String::new();
 
@@ -485,7 +496,7 @@ pub async fn performance(
             )
         })?;
 
-        // usage
+        // usage 信息只做 token 计数，不影响时间统计
         if let Some(usage) = chunk.usage {
             prompt_tokens = usage.prompt_tokens;
             completion_tokens = usage.completion_tokens;
@@ -498,15 +509,13 @@ pub async fn performance(
         let text = &chunk.choices[0].text;
 
         if !text.is_empty() {
-
             let now = Instant::now();
-
+            // 仅第一个非空 token 时赋值
             if first_token_time.is_none() {
                 first_token_time = Some(now);
             }
-
-            last_token_time = Some(now);
-
+            // 持续更新，循环结束后保留最后一次
+            last_text_token_time = Some(now);
             response_text.push_str(text);
         }
     }
@@ -515,18 +524,22 @@ pub async fn performance(
     // 计算性能指标
     // ===============================
 
-    let end_time = last_token_time.unwrap_or_else(Instant::now);
-
+    // ttft：从发出请求到收到第一个 token 的时间
     let ttft = first_token_time
         .map(|t| t.duration_since(start_time).as_secs_f64())
         .unwrap_or(0.0);
 
-    let generation_time = match (first_token_time, last_token_time) {
+    // generation_time：从第一个 token 到最后一个 token 的时间（纯生成阶段）
+    let generation_time = match (first_token_time, last_text_token_time) {
         (Some(first), Some(last)) => last.duration_since(first).as_secs_f64(),
         _ => 0.0,
     };
 
-    let total_time = end_time.duration_since(start_time).as_secs_f64();
+    // total_time：从发出请求到最后一个 token 的总时间
+    let total_time = last_text_token_time
+        .unwrap_or_else(Instant::now)
+        .duration_since(start_time)
+        .as_secs_f64();
 
     Ok(Json(PerformanceResponse {
         success: true,

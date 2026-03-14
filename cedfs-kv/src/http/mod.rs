@@ -16,7 +16,8 @@ const DEFAULT_HTTP_PORT: u16 = 8080;
 /// 客户端可请求 POST /infer，Content-Type: application/json，超时建议 300s
 pub async fn serve(shared: Arc<Shared>, port: Option<u16>) {
     let port = port.unwrap_or(DEFAULT_HTTP_PORT);
-    let app = router::build(shared);
+    let state = Arc::new(controller::ControllerState::new(shared));
+    let app = router::build(state);
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.unwrap();
     info!("HTTP server listening on {}", addr);
