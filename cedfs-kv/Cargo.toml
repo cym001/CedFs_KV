@@ -37,6 +37,8 @@ num-bigint = "0.4"
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tower = "0.4"
+async-openai = { version = "0.33", features = ["completions"] }
+futures-util = "0.3"
 
 cedfs-proto = { version = "*", path = "../cedfs-proto" }
 

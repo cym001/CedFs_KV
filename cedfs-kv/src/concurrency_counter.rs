@@ -47,10 +47,10 @@ impl ConcurrencyEntry {
 
     /// 是否应触发域内迁移：并发数 > 副本数*2 且副本数>0，且域内实例数 != 副本数（相等时不触发）
     pub fn should_trigger_migration(&self, intra_instance_count: u32) -> bool {
-        self.replica_count > 0
-            && self.concurrent_count > (self.replica_count as usize).saturating_mul(2)
-            && intra_instance_count != self.replica_count
-        //false
+        // self.replica_count > 0
+        //     && self.concurrent_count >= (self.replica_count as usize).saturating_mul(2)
+        //     && intra_instance_count != self.replica_count
+        false
     }
 }
 

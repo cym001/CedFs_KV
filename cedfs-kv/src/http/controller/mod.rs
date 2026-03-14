@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
+use async_openai::{
+    config::OpenAIConfig,
+    types::completions::CreateCompletionRequestArgs,
+    Client,
+};
+use futures_util::StreamExt;
+use std::time::Instant;
 
 use inference_load_tracker::InferenceLoadTracker;
 use crate::Shared;
@@ -102,6 +109,44 @@ fn parse_infer_response(body: &str) -> Result<InferResponse, serde_json::Error> 
         result: Some(text),
         error: None,
     })
+}
+
+/// Performance 接口请求体：使用 async-openai 直接测量 LLM 性能
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceRequest {
+    /// 模型名称
+    pub model_name: String,
+    /// 模型路径
+    pub model_path: String,
+    /// 输入 prompt
+    pub prompt: String,
+    /// 最大生成 token 数
+    pub max_tokens: u16,
+}
+
+/// Performance 接口响应体：在 infer 功能基础上增加性能指标
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceResponse {
+    /// 是否成功
+    pub success: bool,
+    /// 生成结果
+    pub result: Option<String>,
+    /// 被调度实例的 URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    /// 首 token 延迟（Time To First Token），单位秒
+    pub ttft: f64,
+    /// 生成时长（从首 token 到末 token），单位秒
+    pub generation_time: f64,
+    /// 总耗时（从请求发出到最后一个 token），单位秒
+    pub total_time: f64,
+    /// 提示词 token 数
+    pub prompt_tokens: u32,
+    /// 生成 token 数
+    pub completion_tokens: u32,
+    /// 错误信息
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// POST /infer：接收 { model, prompt, max_tokens }，按各实例当前未完成请求长度总和最小做负载均衡，转发并返回 JSON
@@ -268,4 +313,230 @@ pub async fn infer(
     })?;
 
     Ok(Json(result))
+}
+
+pub async fn performance(
+    State(shared): State<Arc<Shared>>,
+    Json(payload): Json<PerformanceRequest>,
+) -> Result<Json<PerformanceResponse>, (StatusCode, Json<PerformanceResponse>)> {
+    let prompt_len = payload.prompt.len();
+    info!(
+        "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
+        payload.model_name, payload.model_path, prompt_len, payload.max_tokens
+    );
+    let server = match scheduler::select_server_by_kvcache(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    {
+        Some(s) => {
+            info!(
+                "infer schedule selected server_id={} url={} model={}",
+                s.id, s.url, s.model_name
+            );
+            s
+        }
+        None => {
+            warn!(
+                "no data server available for model={}, prompt_len={}",
+                payload.model_name, prompt_len
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(PerformanceResponse {
+                    success: false,
+                    result: None,
+                    server_url: None,
+                    ttft: 0.0,
+                    generation_time: 0.0,
+                    total_time: 0.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error: Some("no data server available for this model".to_string()),
+                }),
+            ));
+        }
+    };
+
+    // 记录本次请求长度，返回时由 InferenceLoadGuard 自动扣减
+    shared
+        .inference_load_tracker
+        .add_load(server.id, prompt_len);
+    let _load_guard = InferenceLoadGuard {
+        tracker: shared.inference_load_tracker.clone(),
+        server_key: server.id,
+        prompt_len,
+    };
+
+    // 使用 Shared.concurrency_counter：根据 prompt 得到 token_hashes，请求开始 +1，请求结束由 guard 扣减
+    // todo(重复调用)
+    let token_hashes = shared
+        .get_token_hashes_for_prompt(&payload.model_name, &payload.prompt)
+        .await;
+    let _token_guard = if let Some(ref hashes) = token_hashes {
+        if !hashes.is_empty() {
+            let replica_counts = shared.get_replica_counts(hashes.clone());
+            let items: Vec<([u8; 32], u32)> = hashes
+                .iter()
+                .zip(replica_counts.iter())
+                .map(|(&h, &r)| (h, r))
+                .collect();
+            shared.increment_concurrency_and_maybe_migrate(&items);
+            Some(TokenConcurrencyGuard {
+                shared: shared.clone(),
+                token_hashes: hashes.clone(),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 创建 async-openai client
+    let config = OpenAIConfig::new()
+        .with_api_base(server.url.clone());
+
+    let client = Client::with_config(config);
+
+    // ===============================
+    // 构建 completion 请求
+    // ===============================
+
+    let request = CreateCompletionRequestArgs::default()
+        .model(payload.model_path.clone())
+        .prompt(payload.prompt.clone())
+        .max_tokens(payload.max_tokens)
+        .stream(true)
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(PerformanceResponse {
+                    success: false,
+                    result: None,
+                    server_url: Some(server.url.clone()),
+                    ttft: 0.0,
+                    generation_time: 0.0,
+                    total_time: 0.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error: Some(format!("request build failed {}", e)),
+                }),
+            )
+        })?;
+
+    // ===============================
+    // 时间统计
+    // ===============================
+
+    let start_time = Instant::now();
+
+    let mut first_token_time: Option<Instant> = None;
+    let mut last_token_time: Option<Instant> = None;
+
+    let mut response_text = String::new();
+
+    let mut prompt_tokens = 0;
+    let mut completion_tokens = 0;
+
+    // ===============================
+    // 创建 streaming
+    // ===============================
+
+    let mut stream = client
+        .completions()
+        .create_stream(request)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(PerformanceResponse {
+                    success: false,
+                    result: None,
+                    server_url: Some(server.url.clone()),
+                    ttft: 0.0,
+                    generation_time: 0.0,
+                    total_time: 0.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error: Some(format!("stream create failed {}", e)),
+                }),
+            )
+        })?;
+
+    // ===============================
+    // 接收 token stream
+    // ===============================
+
+    while let Some(chunk) = stream.next().await {
+
+        let chunk = chunk.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(PerformanceResponse {
+                    success: false,
+                    result: None,
+                    server_url: Some(server.url.clone()),
+                    ttft: 0.0,
+                    generation_time: 0.0,
+                    total_time: 0.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    error: Some(format!("stream chunk error {}", e)),
+                }),
+            )
+        })?;
+
+        // usage
+        if let Some(usage) = chunk.usage {
+            prompt_tokens = usage.prompt_tokens;
+            completion_tokens = usage.completion_tokens;
+        }
+
+        if chunk.choices.is_empty() {
+            continue;
+        }
+
+        let text = &chunk.choices[0].text;
+
+        if !text.is_empty() {
+
+            let now = Instant::now();
+
+            if first_token_time.is_none() {
+                first_token_time = Some(now);
+            }
+
+            last_token_time = Some(now);
+
+            response_text.push_str(text);
+        }
+    }
+
+    // ===============================
+    // 计算性能指标
+    // ===============================
+
+    let end_time = last_token_time.unwrap_or_else(Instant::now);
+
+    let ttft = first_token_time
+        .map(|t| t.duration_since(start_time).as_secs_f64())
+        .unwrap_or(0.0);
+
+    let generation_time = match (first_token_time, last_token_time) {
+        (Some(first), Some(last)) => last.duration_since(first).as_secs_f64(),
+        _ => 0.0,
+    };
+
+    let total_time = end_time.duration_since(start_time).as_secs_f64();
+
+    Ok(Json(PerformanceResponse {
+        success: true,
+        result: Some(response_text),
+        server_url: Some(server.url.clone()),
+        ttft,
+        generation_time,
+        total_time,
+        prompt_tokens,
+        completion_tokens,
+        error: None,
+    }))
 }

@@ -17,6 +17,7 @@ pub fn build(shared: Arc<Shared>) -> Router {
 
     Router::new()
         .route("/infer", post(controller::infer))
+        .route("/performance", post(controller::performance))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024)) // 16MB
         .layer(cors)
         .with_state(shared)
