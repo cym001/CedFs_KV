@@ -240,7 +240,7 @@ impl KvCacheClient {
         }
 
         // 添加到本地 KV 索引
-        shared.insert_local_kvcache(token_hash).await;
+        shared.insert_local_kvcache(token_hash, new_server_id).await;
 
         // 更新本地引用计数
         shared.ref_count.increment_local_ref_count(token_hash, 1);

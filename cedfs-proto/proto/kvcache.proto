@@ -85,8 +85,9 @@ message RegisterInstanceResponse {
 
 // 3.数据服务器向元数据服务器上传本地删除kvcache元数据
 message RemoveKvMetaRequest {
-    int32 remove_nums = 1;
-    repeated bytes tokens_hash = 2;
+    uint32 id = 1;    
+    int32 remove_nums = 2;
+    repeated bytes tokens_hash = 3;
 }
 
 message RemoveKvMetaResponse {

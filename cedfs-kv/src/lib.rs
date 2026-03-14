@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -56,6 +57,9 @@ pub struct Shared {
 
     // 本地KV块索引
     pub local_kv_index: Arc<RwLock<HashSet<[u8; 32]>>>,
+
+    // 每个 dataserver 持有的本地 KV Cache 块数量
+    pub local_kv_cache_block_count: Arc<DashMap<u32, AtomicUsize>>,
 
     // 全局kv块元数据
     pub global_kvcache_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
@@ -152,6 +156,7 @@ impl KVServer {
                     hasher: Arc::new(hasher),
                     tokenizer_manager,
                     local_kv_index: Arc::new(RwLock::new(HashSet::new())),
+                    local_kv_cache_block_count: Arc::new(DashMap::new()),
                     global_kvcache_table: Arc::new(DashMap::new()),
                     update_kvmeta_table: Arc::new(DashMap::new()),
                     update_kvop_table: Arc::new(DashMap::new()),
@@ -213,7 +218,7 @@ impl Shared {
     /// # 返回
     /// - `true`: 更新已存在的块
     /// - `false`: 插入新块
-    pub async fn insert_local_kvcache(&self, token_hash: [u8; 32]) -> bool {
+    pub async fn insert_local_kvcache(&self, token_hash: [u8; 32], server_id: u32) -> bool {
         let mut local_table = self.local_kv_index.write().await;
 
         if local_table.contains(&token_hash) {
@@ -222,6 +227,10 @@ impl Shared {
         } else {
             // 块不存在，插入新块
             local_table.insert(token_hash);
+            self.local_kv_cache_block_count
+                .entry(server_id)
+                .or_insert_with(|| AtomicUsize::new(0))
+                .fetch_add(1, Ordering::Relaxed);
             false
         }
     }
@@ -331,7 +340,13 @@ impl Shared {
             1 => {
                 {
                     let mut local = self.local_kv_index.write().await;
-                    local.insert(hash);
+                    let inserted = local.insert(hash);
+                    if inserted {
+                        self.local_kv_cache_block_count
+                            .entry(server)
+                            .or_insert_with(|| AtomicUsize::new(0))
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
 
                 if let Some(mut meta) = self.get_global_kvcache(hash) {
@@ -352,7 +367,18 @@ impl Shared {
             2 => {
                 {
                     let mut local = self.local_kv_index.write().await;
-                    local.remove(&hash);
+                    let removed = local.remove(&hash);
+                    if removed {
+                        let counter = self
+                            .local_kv_cache_block_count
+                            .entry(server)
+                            .or_insert_with(|| AtomicUsize::new(0));
+                        let _ = counter.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |v| v.checked_sub(1),
+                        );
+                    }
                 }
 
                 if let Some(mut meta) = self.get_global_kvcache(hash) {
@@ -858,7 +884,7 @@ impl Shared {
                 meta.server_id.push(new_server_id);
             }
         }
-        let _ = self.insert_local_kvcache(token_hash).await;
+        let _ = self.insert_local_kvcache(token_hash, new_server_id).await;
         self.ref_count.increment_local_ref_count(token_hash, 1);
         let update_op = UpdateKvOp {
             token_hash,

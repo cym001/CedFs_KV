@@ -60,6 +60,7 @@ impl KvMeta2Data for KvCacheDataService{
         tracing::debug!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = RemoveKvMetaOp {
+            server_id: req.id,
             remove_nums: req.remove_nums,
             tokens_hash: req.tokens_hash,
             shared: self.shared.clone(),

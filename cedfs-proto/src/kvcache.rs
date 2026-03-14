@@ -133,9 +133,11 @@ pub struct RegisterInstanceResponse {
 /// 3.数据服务器向元数据服务器上传本地删除kvcache元数据
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RemoveKvMetaRequest {
-    #[prost(int32, tag = "1")]
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
+    #[prost(int32, tag = "2")]
     pub remove_nums: i32,
-    #[prost(bytes = "vec", repeated, tag = "2")]
+    #[prost(bytes = "vec", repeated, tag = "3")]
     pub tokens_hash: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
