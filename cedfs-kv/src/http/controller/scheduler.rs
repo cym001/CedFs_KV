@@ -81,12 +81,47 @@ fn filter_servers_by_model(servers: &[DataServer], model_name: &str) -> Vec<Data
 ///
 /// - 若有 `model_filter`，优先只从 `model_name == model` 的节点中选；若无匹配则从全部节点中选
 impl Scheduler {
+    /// 统一调度入口：根据 `config.scheduler_strategy` 选择具体调度算法。
+    ///
+    /// 支持的策略值（大小写不敏感）：
+    /// - `workload` / `min_load`
+    /// - `kvcache` / `cache`
+    /// - `hybrid`
+    /// - `hybrid2`
+    ///
+    /// 当配置值未知时，默认回退到 `hybrid`。
+    pub async fn select_server_by_strategy(
+        &self,
+        shared: &Shared,
+        model_name: &str,
+        prompt: &str,
+    ) -> Option<(DataServer, TokenHashes)> {
+        let strategy = shared.config.scheduler_strategy.trim().to_ascii_lowercase();
+        match strategy.as_str() {
+            "workload" | "min_load" => {
+                self.select_server_by_workload(shared, model_name, prompt).await
+            }
+            "kvcache" | "cache" => {
+                self.select_server_by_kvcache(shared, model_name, prompt).await
+            }
+            "hybrid" => self.select_server_hybrid(shared, model_name, prompt).await,
+            "hybrid2" => self.select_server_hybrid2(shared, model_name, prompt).await,
+            _ => {
+                tracing::warn!(
+                    "unknown scheduler_strategy='{}', fallback to 'hybrid'",
+                    shared.config.scheduler_strategy
+                );
+                self.select_server_hybrid(shared, model_name, prompt).await
+            }
+        }
+    }
+
     pub async fn select_server_by_workload(
         &self,
         shared: &Shared,
         model_name: &str,
         prompt: &str,
-    ) -> Option<(DataServer, Option<TokenHashes>)> {
+    ) -> Option<(DataServer, TokenHashes)> {
         let servers = shared.local_data_server_collect.read().await;
         let candidates = filter_servers_by_model(&servers, model_name);
         drop(servers);
@@ -95,7 +130,8 @@ impl Scheduler {
             .select_server_with_min_load(&candidates)?;
         let token_hashes = shared
             .get_token_hashes_for_prompt(model_name, prompt)
-            .await;
+            .await
+            .unwrap_or_default();
         Some((server, token_hashes))
     }
 }
@@ -111,35 +147,61 @@ impl Scheduler {
         shared: &Shared,
         model_name: &str,
         prompt: &str,
-    ) -> Option<(DataServer, Option<TokenHashes>)> {
+    ) -> Option<(DataServer, TokenHashes)> {
         let servers = shared.local_data_server_collect.read().await;
         let candidates = filter_servers_by_model(&servers, model_name);
         drop(servers);
 
-        let token_hashes = shared
-            .get_token_hashes_for_prompt(model_name, prompt)
+        let tokenized = shared.tokenizer_manager.encode_async(model_name, prompt).await;
+        let (token_hashes, match_results, req_total_tokens) = match tokenized {
+            Ok(token_list) if !token_list.is_empty() => {
+                let token_hashes: TokenHashes = shared
+                    .hasher
+                    .hash_tokens_with_blocks_all(&token_list, shared.config.block_size)
+                    .iter()
+                    .map(|(hash, _offset)| hash.to_u256())
+                    .collect();
+                let match_results = shared.search_tokens(token_hashes.clone());
+                (token_hashes, match_results, token_list.len() as u64)
+            }
+            Ok(_) => (Vec::new(), Vec::new(), 0u64),
+            Err(e) => {
+                tracing::warn!("Failed to encode prompt with model '{}': {}", model_name, e);
+                (Vec::new(), Vec::new(), 0u64)
+            }
+        };
+
+        let candidate_ids: HashSet<u32> = candidates.iter().map(|s| s.id).collect();
+        let best = match_results
+            .iter()
+            .filter(|(id, _)| candidate_ids.contains(id))
+            .max_by_key(|(_, len)| *len)
+            .copied();
+
+        let req_hit_tokens = best.map(|(_, len)| len as u64).unwrap_or(0);
+        self.update_cache_hit_stats_and_maybe_report(req_total_tokens, req_hit_tokens)
             .await;
-        let match_results = token_hashes
-            .as_ref()
-            .map(|hashes| shared.search_tokens(hashes.clone()))
-            .unwrap_or_default();
+
+        let req_hit_ratio = if req_total_tokens > 0 {
+            req_hit_tokens as f64 / req_total_tokens as f64
+        } else {
+            0.0
+        };
         tracing::info!(
-            "select_server_by_kvcache: match_results={:?}",
+            "select_server_by_kvcache: model={}, best_hit_tokens={}, req_total_tokens={}, req_hit_ratio={:.3}, match_results={:?}",
+            model_name,
+            req_hit_tokens,
+            req_total_tokens,
+            req_hit_ratio,
             match_results
         );
 
-        if match_results.is_empty() {
+        if req_hit_tokens == 0 {
             let server = shared
                 .inference_load_tracker
                 .select_server_with_min_load(&candidates)?;
             return Some((server, token_hashes));
         }
-
-        let candidate_ids: HashSet<u32> = candidates.iter().map(|s| s.id).collect();
-        let best = match_results
-            .into_iter()
-            .filter(|(id, _)| candidate_ids.contains(id))
-            .max_by_key(|(_, len)| *len);
 
         let server = best
             .and_then(|(server_id, _)| candidates.iter().find(|s| s.id == server_id).cloned())
@@ -167,7 +229,7 @@ impl Scheduler {
         shared: &Shared,
         model_name: &str,
         prompt: &str,
-    ) -> Option<(DataServer, Option<TokenHashes>)> {
+    ) -> Option<(DataServer, TokenHashes)> {
         let servers = shared.local_data_server_collect.read().await;
         let candidates = filter_servers_by_model(&servers, model_name);
         drop(servers);
@@ -180,7 +242,7 @@ impl Scheduler {
         // prefix_ratio = max_matched / total_tokens
         // 其中 max_matched 为 search_tokens 返回的最大匹配 token 数。
         let tokenized = shared.tokenizer_manager.encode_async(model_name, prompt).await;
-        let (token_hashes_opt, match_results, prefix_ratio, req_total_tokens, req_hit_tokens) =
+        let (token_hashes, match_results, prefix_ratio, req_total_tokens, req_hit_tokens) =
             match tokenized {
                 Ok(token_list) if !token_list.is_empty() => {
                     let total_tokens = token_list.len() as f64;
@@ -199,17 +261,17 @@ impl Scheduler {
                         0.0
                     };
                     (
-                        Some(token_hashes),
+                        token_hashes,
                         results,
                         ratio,
                         token_list.len() as u64,
                         max_matched as u64,
                     )
                 }
-                Ok(_) => (None, Vec::new(), 0.0, 0u64, 0u64),
+                Ok(_) => (Vec::new(), Vec::new(), 0.0, 0u64, 0u64),
                 Err(e) => {
                     tracing::warn!("Failed to encode prompt with model '{}': {}", model_name, e);
-                    (None, Vec::new(), 0.0, 0u64, 0u64)
+                    (Vec::new(), Vec::new(), 0.0, 0u64, 0u64)
                 }
             };
 
@@ -236,7 +298,7 @@ impl Scheduler {
                     matched_len
                 );
                 if let Some(server) = candidates.iter().find(|s| s.id == server_id).cloned() {
-                    return Some((server, token_hashes_opt.clone()));
+                    return Some((server, token_hashes.clone()));
                 }
             }
         }
@@ -262,7 +324,7 @@ impl Scheduler {
                 let server = shared
                     .inference_load_tracker
                     .select_server_with_min_load(&candidates)?;
-                return Some((server, token_hashes_opt.clone()));
+                return Some((server, token_hashes.clone()));
             }
         }
 
@@ -296,7 +358,159 @@ impl Scheduler {
                     .inference_load_tracker
                     .select_server_with_min_load(&candidates)
             })?;
-            Some((server, token_hashes_opt))
+            Some((server, token_hashes))
+        }
+    }
+}
+
+
+/// 综合调度算法2，按以下优先级选取目标实例：
+///
+/// 1. **负载均衡路由**：当系统负载不平衡（最高负载 >= 最低负载 * 3）时，
+///    选择当前负载最小的实例。
+/// 2. **缓存感知路由**：当请求 prompt 的 KV cache 前缀匹配率 > [`CACHE_THRESHOLD`] 时，
+///    选择匹配长度最大的实例（与 `select_server_by_kvcache` 相同逻辑）。
+/// 3. **最少 KV Cache 路由**：上述两个策略均不触发时，选择拥有 KV cache 块数量最少的实例。
+///
+/// 每级策略均在候选集为空时以最小负载实例兜底。
+
+impl Scheduler {
+    pub async fn select_server_hybrid2(
+        &self,
+        shared: &Shared,
+        model_name: &str,
+        prompt: &str,
+    ) -> Option<(DataServer, TokenHashes)> {
+        let servers = shared.local_data_server_collect.read().await;
+        let candidates = filter_servers_by_model(&servers, model_name);
+        drop(servers);
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // --- 计算 KV cache 前缀匹配率 ---
+        // prefix_ratio = max_matched / total_tokens
+        // 其中 max_matched 为 search_tokens 返回的最大匹配 token 数。
+        let tokenized = shared.tokenizer_manager.encode_async(model_name, prompt).await;
+        let (token_hashes, match_results, prefix_ratio, req_total_tokens, req_hit_tokens) =
+            match tokenized {
+                Ok(token_list) if !token_list.is_empty() => {
+                    let total_tokens = token_list.len() as f64;
+                    let token_hashes: TokenHashes = shared
+                        .hasher
+                        .hash_tokens_with_blocks_all(&token_list, shared.config.block_size)
+                        .iter()
+                        .map(|(hash, _offset)| hash.to_u256())
+                        .collect();
+
+                    let results = shared.search_tokens(token_hashes.clone());
+                    let max_matched = results.iter().map(|(_, len)| *len).max().unwrap_or(0);
+                    let ratio = if total_tokens > 0.0 {
+                        max_matched as f64 / total_tokens
+                    } else {
+                        0.0
+                    };
+                    (
+                        token_hashes,
+                        results,
+                        ratio,
+                        token_list.len() as u64,
+                        max_matched as u64,
+                    )
+                }
+                Ok(_) => (Vec::new(), Vec::new(), 0.0, 0u64, 0u64),
+                Err(e) => {
+                    tracing::warn!("Failed to encode prompt with model '{}': {}", model_name, e);
+                    (Vec::new(), Vec::new(), 0.0, 0u64, 0u64)
+                }
+            };
+
+        self.update_cache_hit_stats_and_maybe_report(req_total_tokens, req_hit_tokens)
+            .await;
+
+        tracing::info!(
+            "select_server_hybrid2: model={}, prefix_ratio={:.3}",
+            model_name,
+            prefix_ratio
+        );
+
+        // --- 策略一：负载均衡路由 ---
+        {
+            let loads: Vec<u64> = candidates
+                .iter()
+                .map(|s| shared.inference_load_tracker.get_load(&s.id))
+                .collect();
+            let min_load = loads.iter().copied().min().unwrap_or(0);
+            let max_load = loads.iter().copied().max().unwrap_or(0);
+
+            let imbalanced = max_load >= min_load.saturating_mul(LOAD_IMBALANCE_RATIO)
+                && !(min_load == 0 && max_load == 0);
+
+            if imbalanced {
+                tracing::info!(
+                    "select_server_hybrid2: load-balance route -> min_load={}, max_load={}",
+                    min_load,
+                    max_load
+                );
+                let server = shared
+                    .inference_load_tracker
+                    .select_server_with_min_load(&candidates)?;
+                return Some((server, token_hashes.clone()));
+            }
+        }
+
+        // --- 策略二：缓存感知路由 ---
+        if prefix_ratio > CACHE_THRESHOLD && !match_results.is_empty() {
+            let candidate_ids: HashSet<u32> = candidates.iter().map(|s| s.id).collect();
+            let best = match_results
+                .into_iter()
+                .filter(|(id, _)| candidate_ids.contains(id))
+                .max_by_key(|(_, len)| *len);
+
+            if let Some((server_id, matched_len)) = best {
+                tracing::info!(
+                    "select_server_hybrid2: cache-aware route -> server_id={}, matched_len={}",
+                    server_id,
+                    matched_len
+                );
+                if let Some(server) = candidates.iter().find(|s| s.id == server_id).cloned() {
+                    return Some((server, token_hashes.clone()));
+                }
+            }
+        }
+
+        // --- 策略三：最少 KV Cache 路由 ---
+        {
+            let selected = candidates
+                .iter()
+                .min_by_key(|s| {
+                    shared
+                        .local_kv_cache_block_count
+                        .get(&s.id)
+                        .map(|count| count.load(Ordering::Relaxed) as u64)
+                        .unwrap_or(0)
+                })
+                .cloned();
+
+            if let Some(ref s) = selected {
+                let kvcache_count = shared
+                    .local_kv_cache_block_count
+                    .get(&s.id)
+                    .map(|count| count.load(Ordering::Relaxed) as u64)
+                    .unwrap_or(0);
+                tracing::info!(
+                    "select_server_hybrid2: min-kvcache route -> server_id={}, kvcache_count={}",
+                    s.id,
+                    kvcache_count
+                );
+            }
+            let server = selected.or_else(|| {
+                shared
+                    .inference_load_tracker
+                    .select_server_with_min_load(&candidates)
+            })?;
+            Some((server, token_hashes))
         }
     }
 }

@@ -140,7 +140,7 @@ impl KVServer {
                 );
 
                 // 创建并发度统计器（5秒过期时间）
-                let concurrency_counter = Arc::new(ConcurrencyCounter::new());
+                let concurrency_counter = Arc::new(ConcurrencyCounter::new(config.transfer_strategy));
 
                 // 启动并发度统计器的定期清理任务（每秒清理一次）
                 ConcurrencyCounter::start_cleanup_task(

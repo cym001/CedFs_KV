@@ -202,7 +202,7 @@ pub async fn infer(
     //         ));
     //     }
     // };
-    let (server, token_hashes) = match state.scheduler.select_server_by_kvcache(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
         Some((s, hashes)) => {
             info!(
@@ -238,7 +238,7 @@ pub async fn infer(
     };
 
     // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    let _token_guard = if let Some(ref hashes) = token_hashes {
+    let _token_guard = {
         if !hashes.is_empty() {
             let replica_counts = shared.get_replica_counts(hashes.clone());
             let items: Vec<([u8; 32], u32)> = hashes
@@ -254,8 +254,6 @@ pub async fn infer(
         } else {
             None
         }
-    } else {
-        None
     };
 
     //todo()错误处理
@@ -337,7 +335,7 @@ pub async fn performance(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
         payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
-    let (server, token_hashes) = match state.scheduler.select_server_hybrid(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
         Some((s, hashes)) => {
             info!(
@@ -379,7 +377,7 @@ pub async fn performance(
     };
 
     // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    let _token_guard = if let Some(ref hashes) = token_hashes {
+    let _token_guard = {
         if !hashes.is_empty() {
             let replica_counts = shared.get_replica_counts(hashes.clone());
             let items: Vec<([u8; 32], u32)> = hashes
@@ -395,8 +393,6 @@ pub async fn performance(
         } else {
             None
         }
-    } else {
-        None
     };
 
     // 创建 async-openai client

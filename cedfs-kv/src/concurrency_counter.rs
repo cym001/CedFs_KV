@@ -47,10 +47,9 @@ impl ConcurrencyEntry {
 
     /// 是否应触发域内迁移：并发数 > 副本数*2 且副本数>0，且域内实例数 != 副本数（相等时不触发）
     pub fn should_trigger_migration(&self, intra_instance_count: u32) -> bool {
-        // self.replica_count > 0
-        //     && self.concurrent_count >= (self.replica_count as usize).saturating_mul(2)
-        //     && intra_instance_count != self.replica_count
-        false
+        self.replica_count > 0
+            && self.concurrent_count >= (self.replica_count as usize).saturating_mul(2)
+            && intra_instance_count != self.replica_count
     }
 }
 
@@ -60,14 +59,17 @@ pub struct ConcurrencyCounter {
     intra_instance_count: u32,
     /// 存储每个 token_hash 的并发度与副本数信息
     counters: Arc<DashMap<[u8; 32], ConcurrencyEntry>>,
+    // 是否迁移
+    is_transfer: bool,
 }
 
 impl ConcurrencyCounter {
     /// 创建新的并发度统计器
-    pub fn new() -> Self {
+    pub fn new(is_transfer: bool) -> Self {
         Self {
             intra_instance_count: 0,
             counters: Arc::new(DashMap::new()),
+            is_transfer
         }
     }
 
@@ -86,6 +88,9 @@ impl ConcurrencyCounter {
                 entry.set_replica_count(replica_count);
                 entry
             });
+        if !self.is_transfer {
+            return false;
+        }
         self.counters
             .get(&token_hash)
             .map(|e| e.should_trigger_migration(self.intra_instance_count))
