@@ -18,6 +18,7 @@ const LOAD_IMBALANCE_RATIO: u64 = 3;
 const CACHE_THRESHOLD: f64 = 0.5;
 
 pub struct Scheduler {
+    strategy: String,
     stat_total_tokens: AtomicU64,
     stat_hit_tokens: AtomicU64,
     stat_request_count: AtomicU64,
@@ -25,8 +26,10 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new() -> Self {
+    pub fn new(strategy: impl Into<String>) -> Self {
+        let strategy = strategy.into().trim().to_ascii_lowercase();
         Self {
+            strategy,
             stat_total_tokens: AtomicU64::new(0),
             stat_hit_tokens: AtomicU64::new(0),
             stat_request_count: AtomicU64::new(0),
@@ -41,7 +44,7 @@ impl Scheduler {
         self.stat_request_count.fetch_add(1, Ordering::Relaxed);
 
         let mut last_report = self.stat_last_report.lock().await;
-        if last_report.elapsed() >= Duration::from_secs(60) {
+        if last_report.elapsed() >= Duration::from_secs(30) {
             let total = self.stat_total_tokens.swap(0, Ordering::Relaxed);
             let hit = self.stat_hit_tokens.swap(0, Ordering::Relaxed);
             let reqs = self.stat_request_count.swap(0, Ordering::Relaxed);
@@ -81,7 +84,7 @@ fn filter_servers_by_model(servers: &[DataServer], model_name: &str) -> Vec<Data
 ///
 /// - 若有 `model_filter`，优先只从 `model_name == model` 的节点中选；若无匹配则从全部节点中选
 impl Scheduler {
-    /// 统一调度入口：根据 `config.scheduler_strategy` 选择具体调度算法。
+    /// 统一调度入口：根据初始化时注入的 `strategy` 选择具体调度算法。
     ///
     /// 支持的策略值（大小写不敏感）：
     /// - `workload` / `min_load`
@@ -96,8 +99,7 @@ impl Scheduler {
         model_name: &str,
         prompt: &str,
     ) -> Option<(DataServer, TokenHashes)> {
-        let strategy = shared.config.scheduler_strategy.trim().to_ascii_lowercase();
-        match strategy.as_str() {
+        match self.strategy.as_str() {
             "workload" | "min_load" => {
                 self.select_server_by_workload(shared, model_name, prompt).await
             }
@@ -109,7 +111,7 @@ impl Scheduler {
             _ => {
                 tracing::warn!(
                     "unknown scheduler_strategy='{}', fallback to 'hybrid'",
-                    shared.config.scheduler_strategy
+                    self.strategy
                 );
                 self.select_server_hybrid(shared, model_name, prompt).await
             }

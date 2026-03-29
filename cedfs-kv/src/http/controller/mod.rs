@@ -30,9 +30,10 @@ pub struct ControllerState {
 
 impl ControllerState {
     pub fn new(shared: Arc<Shared>) -> Self {
+        let scheduler_strategy = shared.config.scheduler_strategy.clone();
         Self {
             shared,
-            scheduler: Arc::new(Scheduler::new()),
+            scheduler: Arc::new(Scheduler::new(scheduler_strategy)),
         }
     }
 }
