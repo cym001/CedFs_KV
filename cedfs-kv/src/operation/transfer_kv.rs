@@ -16,7 +16,7 @@ impl TransferKvOp {
     /// 发送 transfer_kv 请求 (使用 gRPC)
     pub async fn send_transfer_request(
         &self,
-        hash: [u8; 32],
+        hash: Vec<u8>,
         position: String,
         offsets: Vec<u32>,
         target_ip: String,
@@ -24,7 +24,7 @@ impl TransferKvOp {
         do_copy: bool,
     ) -> Result<TransferKvResponse, anyhow::Error> {
         let request_body = TransferKvRequest {
-            hash: hash.to_vec(),
+            hash,
             position,
             offset: offsets,
             target_ip,

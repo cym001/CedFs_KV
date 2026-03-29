@@ -108,29 +108,6 @@ impl KvCacheClient {
         Self::execute_kv_migration(shared, transfer_items, "cross-domain").await
     }
 
-    /// 执行域内 KV 迁移操作
-    async fn intra_domain_kv_migration(shared: &Shared) -> anyhow::Result<()> {
-        // 获取需要迁移的 KV 块（域内迁移，基于并发度）
-        let k = shared.config.replica_pull_count as usize;
-        let transfer_items = PopularityScoreOp {
-            shared: shared.clone(),
-        }
-        .intra_domain_transfer_candidate(k)
-        .await;
-
-        if transfer_items.is_empty() {
-            tracing::debug!("No KV blocks need intra-domain migration");
-            return Ok(());
-        }
-
-        tracing::info!(
-            "Found {} KV blocks to migrate within domain based on concurrency",
-            transfer_items.len()
-        );
-
-        Self::execute_kv_migration(shared, transfer_items, "intra-domain").await
-    }
-
     /// 执行 KV 块迁移的通用逻辑
     /// 
     /// # 参数
@@ -155,7 +132,7 @@ impl KvCacheClient {
 
             match client
                 .send_transfer_request(
-                    token_hash,
+                    token_hash.to_vec(),
                     position,
                     vec![offset],
                     dst_server.ip.to_string(),
@@ -590,7 +567,7 @@ impl KvCacheClient {
 
             match client
                 .send_transfer_request(
-                    token_hash,
+                    token_hash.to_vec(),
                     position,
                     vec![offset],
                     dst_server.ip.to_string(),

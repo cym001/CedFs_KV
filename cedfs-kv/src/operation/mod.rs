@@ -7,3 +7,5 @@ pub mod register_instance;
 pub mod search_kv;
 pub mod remove_kvmeta;
 pub mod transfer_kv;
+pub mod new_request;
+pub mod request_end;

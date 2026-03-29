@@ -15,9 +15,8 @@ use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
 use crate::tokenizers::TokenizerManager;
-use crate::concurrency_counter::ConcurrencyCounter;
-use crate::http::controller::inference_load_tracker::InferenceLoadTracker;
 use crate::operation::transfer_kv::TransferKvOp;
+use crate::transfer::squnence::ActiveSequences;
 
 pub mod config;
 pub mod types;
@@ -29,8 +28,6 @@ pub mod network;
 pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
-pub mod concurrency_counter;
-pub mod http;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -76,14 +73,28 @@ pub struct Shared {
     // 节点配置
     pub config: Arc<Config>,
 
-    // 并发度统计器
-    pub concurrency_counter: Arc<ConcurrencyCounter>,
-
-    // 推理实例未完成请求长度总和（用于最小负载调度）
-    pub inference_load_tracker: Arc<InferenceLoadTracker>,
-
     // 近期迁移记录，防止同一 token 在短时间内重复迁移
     pub recent_migrations: Arc<DashMap<[u8; 32], std::time::Instant>>,
+
+    //活跃请求序列
+    pub active_squence: Arc<ActiveSequences>,
+
+    // 迁移目标节点轮转索引（用于在候选目标中做 round-robin）
+    pub migration_target_rr_index: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HashSeqMigrationResult {
+    pub candidate_count: usize,
+    pub selected_target_server_id: Option<u32>,
+    pub total_hash_count: usize,
+    pub known_meta_count: usize,
+    pub missing_meta_count: usize,
+    pub to_migrate_count: usize,
+    pub success_count: usize,
+    pub fail_count: usize,
+    pub status_not_found_count: usize,
+    pub skipped_reason: Option<String>,
 }
 pub struct KVServer {
     pub shared: Shared,
@@ -139,14 +150,8 @@ impl KVServer {
                     TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await
                 );
 
-                // 创建并发度统计器（5秒过期时间）
-                let concurrency_counter = Arc::new(ConcurrencyCounter::new(config.transfer_strategy));
+                let active_squence = Arc::new(ActiveSequences::new(config.block_size));
 
-                // 启动并发度统计器的定期清理任务（每秒清理一次）
-                ConcurrencyCounter::start_cleanup_task(
-                    concurrency_counter.clone(),
-                    std::time::Duration::from_secs(1)
-                );
                 
                 let shared = Shared {
                     meta_server_collect: meta_servers,
@@ -162,9 +167,9 @@ impl KVServer {
                     update_kvop_table: Arc::new(DashMap::new()),
                     ref_count: Arc::new(RefCount::new()),
                     config: Arc::new(config),
-                    concurrency_counter,
-                    inference_load_tracker: Arc::new(InferenceLoadTracker::new()),
                     recent_migrations: Arc::new(DashMap::new()),
+                    active_squence,
+                    migration_target_rr_index: Arc::new(AtomicUsize::new(0)),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -793,33 +798,6 @@ impl Shared {
         Some(replica_counts)
     }
 
-    /// 获取指定 token_hash 的并发度
-    ///
-    /// # 参数
-    /// - `token_hash`: 块的哈希值
-    ///
-    /// # 返回
-    /// - 当前有效的并发度计数
-    pub fn get_kvcache_concurrency(&self, token_hash: [u8; 32]) -> usize {
-        self.concurrency_counter.get_concurrency(token_hash)
-    }
-
-    /// 获取所有 KV 块的并发度统计信息
-    ///
-    /// # 返回
-    /// - (total_entries, total_concurrency, max_concurrency):
-    ///   总条目数、总并发度、最大并发度
-    pub fn get_concurrency_statistics(&self) -> (usize, usize, usize) {
-        self.concurrency_counter.get_statistics()
-    }
-
-    /// 获取所有 token_hash 的并发度信息
-    ///
-    /// # 返回
-    /// - Vec<(token_hash, concurrency)>: 所有块的并发度信息
-    pub fn get_all_kvcache_concurrency(&self) -> Vec<([u8; 32], usize)> {
-        self.concurrency_counter.get_all_concurrency()
-    }
 
     pub async fn intra_domain_transfer(
         &self,
@@ -859,7 +837,7 @@ impl Shared {
         let position = "LocalCPUBackend".to_string();
         let response = client
             .send_transfer_request(
-                token_hash,
+                token_hash.to_vec(),
                 position,
                 vec![offset],
                 dst_server.ip.to_string(),
@@ -884,6 +862,190 @@ impl Shared {
             self.remove_server_from_kv_meta(token_hash, src_server.id);
         }
         Ok(())
+    }
+
+    /// 按 hash 序列迁移 KV 块：
+    /// - 源节点由调用方指定
+    /// - 目标节点从 global_data_server_collect 候选中轮转选择
+    /// - 输入为按顺序的 (hash, concurrency)
+    /// - 顺序门控：遇到第一个 concurrency < replica_count*2 后，后续块全部不触发迁移
+    pub async fn migrate_hash_seq_with_rr_target(
+        &self,
+        source_server: &DataServer,
+        hash_seq_with_concurrency: &[([u8; 32], u64)],
+    ) -> anyhow::Result<HashSeqMigrationResult> {
+        let mut result = HashSeqMigrationResult {
+            total_hash_count: hash_seq_with_concurrency.len(),
+            ..HashSeqMigrationResult::default()
+        };
+
+        if hash_seq_with_concurrency.is_empty() {
+            result.skipped_reason = Some("empty_hash_seq".to_string());
+            return Ok(result);
+        }
+
+        // 1) 构建候选目标（排除源节点、按 id 去重）
+        let mut candidate_targets = Vec::new();
+        let mut seen_target_ids = HashSet::new();
+        for entry in self.global_data_server_collect.iter() {
+            for ds in entry.value().iter() {
+                if ds.id == source_server.id {
+                    continue;
+                }
+                if seen_target_ids.insert(ds.id) {
+                    candidate_targets.push(ds.clone());
+                }
+            }
+        }
+        result.candidate_count = candidate_targets.len();
+        if candidate_targets.is_empty() {
+            result.skipped_reason = Some("no_target_candidates".to_string());
+            return Ok(result);
+        }
+
+        // 2) 先解析可迁移元数据（hash -> offset + replica_count + concurrency）
+        let mut known_hash_with_state: Vec<([u8; 32], u32, u64, u64)> = Vec::new();
+        for (token_hash, concurrency) in hash_seq_with_concurrency {
+            if let Some(meta) = self.global_kvcache_table.get(token_hash) {
+                known_hash_with_state.push((
+                    *token_hash,
+                    meta.offset,
+                    *concurrency,
+                    meta.server_id.len() as u64,
+                ));
+            } else {
+                result.missing_meta_count += 1;
+            }
+        }
+        result.known_meta_count = known_hash_with_state.len();
+        if known_hash_with_state.is_empty() {
+            result.skipped_reason = Some("no_known_meta".to_string());
+            return Ok(result);
+        }
+
+        // 3) 顺序门控：第一个 concurrency < replica_count*2 之后全部截断
+        let mut gated_hashes: Vec<([u8; 32], u32, u64)> = Vec::new();
+        for (token_hash, offset, concurrency, replica_count) in known_hash_with_state {
+            if concurrency < replica_count.saturating_mul(2) {
+                break;
+            }
+            gated_hashes.push((token_hash, offset, concurrency));
+        }
+        if gated_hashes.is_empty() {
+            result.skipped_reason = Some("below_replica_concurrency_gate".to_string());
+            return Ok(result);
+        }
+
+        // 4) 从轮转起点开始环形扫描，选择第一个“未完全匹配 hash 序列”的目标
+        //    前缀缓存语义：一旦首个块未命中，后续块默认均未命中
+        let start = self
+            .migration_target_rr_index
+            .fetch_add(1, Ordering::Relaxed)
+            % candidate_targets.len();
+        let mut selected_target: Option<DataServer> = None;
+
+        for step in 0..candidate_targets.len() {
+            let idx = (start + step) % candidate_targets.len();
+            let target = &candidate_targets[idx];
+            let mut first_miss_at: Option<usize> = None;
+            for (i, (token_hash, _, _)) in gated_hashes.iter().enumerate() {
+                let exists_on_target = self
+                    .global_kvcache_table
+                    .get(token_hash)
+                    .map(|meta| meta.server_id.contains(&target.id))
+                    .unwrap_or(false);
+                if !exists_on_target {
+                    first_miss_at = Some(i);
+                    break;
+                }
+            }
+            let missing = if let Some(first_idx) = first_miss_at {
+                gated_hashes[first_idx..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            if !missing.is_empty() {
+                tracing::debug!(
+                    "Prefix-miss target selected: server_id={}, first_miss_index={}, migrate_count={}",
+                    target.id,
+                    first_miss_at.unwrap_or(0),
+                    missing.len()
+                );
+                selected_target = Some(target.clone());
+                break;
+            }
+        }
+
+        let Some(target_server) = selected_target else {
+            result.skipped_reason = Some("all_targets_fully_matched".to_string());
+            return Ok(result);
+        };
+        result.selected_target_server_id = Some(target_server.id);
+
+        // 5) 调用 transfer_kv：不再只打包 miss 块，而是打包整条序列（可解析 offset 的全部块）
+        //    miss 判定与具体拷贝策略交由实际迁移节点处理
+        let url = format!("http://{}:{}", source_server.ip, source_server.rpc_port);
+        let client = TransferKvOp::new(&url);
+        let position = "LocalCPUBackend".to_string();
+
+        let all_request_hashes: Vec<[u8; 32]> = gated_hashes
+            .iter()
+            .map(|(token_hash, _, _)| *token_hash)
+            .collect();
+        let mut concatenated_hash_bytes: Vec<u8> =
+            Vec::with_capacity(all_request_hashes.len() * 32);
+        for token_hash in &all_request_hashes {
+            concatenated_hash_bytes.extend_from_slice(token_hash);
+        }
+        let all_request_offsets: Vec<u32> = gated_hashes
+            .iter()
+            .map(|(_, offset, _)| *offset)
+            .collect();
+        result.to_migrate_count = all_request_hashes.len();
+
+        match client
+            .send_transfer_request(
+                concatenated_hash_bytes,
+                position,
+                all_request_offsets,
+                target_server.ip.to_string(),
+                target_server.init_port as i32,
+                true,
+            )
+            .await
+        {
+            Ok(response) => {
+                if response.status > 0 {
+                    result.success_count += all_request_hashes.len();
+                    let now = std::time::Instant::now();
+                    for token_hash in all_request_hashes {
+                        self.update_kv_meta_after_migration(token_hash, target_server.id)
+                            .await;
+                        self.recent_migrations.insert(token_hash, now);
+                    }
+                } else if response.status == -1 {
+                    result.status_not_found_count += all_request_hashes.len();
+                    for token_hash in all_request_hashes {
+                        self.remove_server_from_kv_meta(token_hash, source_server.id);
+                    }
+                } else {
+                    result.fail_count += all_request_hashes.len();
+                }
+            }
+            Err(e) => {
+                result.fail_count += all_request_hashes.len();
+                tracing::warn!(
+                    "migrate_hash_seq_with_rr_target batch request failed: source_server={}, target_server={}, batch_size={}, err={:?}",
+                    source_server.id,
+                    target_server.id,
+                    all_request_hashes.len(),
+                    e
+                );
+            }
+        }
+
+        Ok(result)
     }
 
     /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
@@ -920,43 +1082,7 @@ impl Shared {
         }
     }
 
-    /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移。
-    /// 为避免抖动，对同一 token_hash 在短时间内的重复迁移会被抑制。
-    pub fn increment_concurrency_and_maybe_migrate(&self, items: &[([u8; 32], u32)]) {
-        let to_migrate = self.concurrency_counter.batch_increment(items);
-        let now = std::time::Instant::now();
-        let cooldown = std::time::Duration::from_secs(5);
 
-        for token_hash in to_migrate {
-            let mut should_spawn = false;
-
-            if let Some(mut entry) = self.recent_migrations.get_mut(&token_hash) {
-                // 已有迁移记录，检查是否超过冷却时间
-                if now.duration_since(*entry) >= cooldown {
-                    *entry = now;
-                    should_spawn = true;
-                }
-            } else {
-                // 首次迁移该 token_hash，记录时间并允许迁移
-                self.recent_migrations.insert(token_hash, now);
-                should_spawn = true;
-            }
-
-            if should_spawn {
-                let hex = Shared::token_hash_to_hex(&token_hash);
-                tracing::info!(
-                    "Concurrency-triggered intra-domain migration scheduled for token_hash 0x{}",
-                    hex
-                );
-                let shared = self.clone();
-                tokio::spawn(async move {
-                    shared
-                        .try_trigger_intra_domain_migration_for_token(token_hash)
-                        .await;
-                });
-            }
-        }
-    }
 }
 
 

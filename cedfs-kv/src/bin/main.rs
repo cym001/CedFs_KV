@@ -10,7 +10,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use cedfs_kv::KVServer;
 use cedfs_kv::client::KvCacheClient;
-use cedfs_kv::http;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -53,12 +52,6 @@ async fn main() -> anyhow::Result<()> {
     let client = KvCacheClient {
         shared: shared.clone(),
     };
-    let http_shared = Arc::new(shared);
-
-    //let mut transfer_server = KVBootstrapServer::new(transfer_meta_port);
-    tokio::spawn(async move {
-        http::serve(http_shared, Some(18080)).await;
-    });
 
     let (_serve_res, launch_res) = tokio::join!(
         kvserver.serve(),
