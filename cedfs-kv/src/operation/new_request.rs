@@ -101,7 +101,7 @@ impl NewRequestOp {
             .shared
             .migrate_hash_seq_with_rr_target(&source_server, &eligible_blocks)
             .await?;
-        tracing::debug!(
+        tracing::info!(
             "NewRequestOp: request_id={} migration result: {:?}",
             self.request_id,
             migration_result
