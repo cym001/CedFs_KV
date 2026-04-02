@@ -143,7 +143,12 @@ impl KVServer {
                     },
                 };
 
-                let hasher = TokenHasher::new(algorithm, config.unfull_chunk, config.hash_seed);
+                let hasher = TokenHasher::new(
+                    algorithm,
+                    config.unfull_chunk,
+                    config.hash_seed,
+                    config.python_hash_seed.clone(),
+                )?;
 
                 // 初始化TokenizerManager并预加载所有配置的tokenizer
                 let tokenizer_manager = Arc::new(

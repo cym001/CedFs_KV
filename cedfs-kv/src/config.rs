@@ -45,6 +45,9 @@ pub struct Config {
     // hash种子值
     pub hash_seed: u64,
 
+    // vLLM 兼容的 PYTHONHASHSEED（字符串）
+    pub python_hash_seed: Option<String>,
+
     // model_name到tokenizer_path的映射
     pub model_tokenizer_map: HashMap<String, String>,
 
@@ -97,6 +100,12 @@ impl Config {
         let hash_seed: u64 = config.get("hash_seed")
             .map_err(|e| ConfigError::MissingField(format!("hash_seed: {}", e)))?;
 
+        // 优先读取配置中的 python_hash_seed，否则回退到环境变量 PYTHONHASHSEED
+        let python_hash_seed: Option<String> = config
+            .get::<String>("python_hash_seed")
+            .ok()
+            .or_else(|| std::env::var("PYTHONHASHSEED").ok());
+
         let model_tokenizer_map: HashMap<String, String> = config.get("model_tokenizer_map")
             .map_err(|e| ConfigError::MissingField(format!("model_tokenizer_map: {}", e)))?;
 
@@ -120,6 +129,7 @@ impl Config {
             .unfull_chunk(unfull_chunk)
             .hash_algorithm(hash_algorithm)
             .hash_seed(hash_seed)
+            .python_hash_seed(python_hash_seed)
             .model_tokenizer_map(model_tokenizer_map)
             .scheduler_strategy(scheduler_strategy)
             .transfer_strategy(transfer_strategy)

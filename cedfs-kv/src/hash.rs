@@ -1,9 +1,9 @@
 use sha2::{Sha256, Digest};
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use serde::Serialize;
 use num_bigint::BigUint;
-use serde_cbor::Value as CborValue;
 
 /// 哈希算法类型
 #[derive(Debug, Clone, Copy)]
@@ -13,6 +13,7 @@ pub enum HashAlgorithm {
     Sha256Cbor,
     Sha256CrossLanguage,
 }
+
 
 /// 哈希结果类型 - 可以是 64 位或 256 位
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -80,48 +81,84 @@ pub struct TokenHasher {
     seed: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashInitError {
+    MissingPythonHashSeedForSha256Cbor,
+    CborSerializeError(String),
+}
+
+impl fmt::Display for HashInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HashInitError::MissingPythonHashSeedForSha256Cbor => {
+                write!(
+                    f,
+                    "PYTHONHASHSEED is required for sha256_cbor to align with vLLM init_none_hash"
+                )
+            }
+            HashInitError::CborSerializeError(msg) => {
+                write!(f, "CBOR serialization failed: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for HashInitError {}
+
 impl TokenHasher {
     /// 创建新的 TokenHasher
-    pub fn new(algorithm: HashAlgorithm, unfull_chunk: bool, seed: u64) -> Self {
-        let none_hash = Self::compute_none_hash(algorithm, seed);
-        Self {
+    pub fn new(
+        algorithm: HashAlgorithm,
+        unfull_chunk: bool,
+        seed: u64,
+        python_hash_seed: Option<String>,
+    ) -> Result<Self, HashInitError> {
+        let none_hash = Self::compute_none_hash(algorithm, seed, python_hash_seed.as_deref())?;
+        Ok(Self {
             algorithm,
             none_hash,
             unfull_chunk,
             seed,
-        }
+        })
     }
 
     /// 使用默认的 builtin 算法创建
     pub fn default() -> Self {
-        Self::new(HashAlgorithm::Builtin, false, 0)
+        Self::new(HashAlgorithm::Builtin, false, 0, None)
+            .expect("default builtin hasher initialization should never fail")
     }
 
     /// 计算 NONE_HASH 的初始值
-    fn compute_none_hash(algorithm: HashAlgorithm, seed: u64) -> HashValue {
+    fn compute_none_hash(
+        algorithm: HashAlgorithm,
+        seed: u64,
+        python_hash_seed: Option<&str>,
+    ) -> Result<HashValue, HashInitError> {
         match algorithm {
             HashAlgorithm::Builtin => {
                 let mut hasher = DefaultHasher::new();
                 seed.hash(&mut hasher);
                 None::<u32>.hash(&mut hasher);
-                HashValue::U64(hasher.finish())
+                Ok(HashValue::U64(hasher.finish()))
             }
             HashAlgorithm::Sha256 => {
                 let mut hasher = Sha256::new();
                 hasher.update(seed.to_le_bytes());
                 hasher.update(b"None");
-                HashValue::U256(hasher.finalize().into())
+                Ok(HashValue::U256(hasher.finalize().into()))
             }
             HashAlgorithm::Sha256Cbor => {
-                // Match Python: hashlib.sha256(cbor2.dumps(None)).digest()
-                // cbor2.dumps(None) produces b'\xf6' (CBOR null)
-                let cbor_bytes = serde_cbor::to_vec(&CborValue::Null)
-                    .expect("Failed to CBOR encode None");
-                HashValue::U256(Sha256::digest(&cbor_bytes).into())
+                // Match vLLM >= PR#20511 init_none_hash():
+                // NONE_HASH = hash_fn(PYTHONHASHSEED) where hash_fn is sha256_cbor.
+                let hash_seed = python_hash_seed
+                    .ok_or(HashInitError::MissingPythonHashSeedForSha256Cbor)?;
+                let cbor_bytes = serde_cbor::to_vec(&hash_seed)
+                    .map_err(|e| HashInitError::CborSerializeError(e.to_string()))?;
+                Ok(HashValue::U256(Sha256::digest(&cbor_bytes).into()))
             }
             HashAlgorithm::Sha256CrossLanguage => {
                 // Cross-language None serialization: 直接返回 32 字节的全零
-                HashValue::U256([0u8; 32])
+                Ok(HashValue::U256([0u8; 32]))
             }
         }
     }
@@ -225,14 +262,16 @@ impl TokenHasher {
         HashValue::U256(result.into())
     }
 
-    /// 使用 SHA256 + CBOR 哈希（跨语言兼容）
+    /// 使用 SHA256 + CBOR 哈希（严格对齐 vLLM canonicalize 语义）
     ///
     /// 匹配 Python 实现：
     /// ```python
     /// import cbor2, hashlib
-    /// hash_func = lambda x: hashlib.sha256(cbor2.dumps(x)).digest()
-    /// NONE_HASH = hash_func(None)
-    /// result = hash_func((prefix_hash, tokens_tuple, extra_keys))
+    /// hash_func = lambda x: hashlib.sha256(cbor2.dumps(x, canonical=True)).digest()
+    /// NONE_HASH = hash_func(PYTHONHASHSEED)
+    /// canon_prefix = prefix_hash if prefix_hash is not None else NONE_HASH  # bytes
+    /// canon_extra = tuple(extra_keys) if extra_keys is not None else ()
+    /// result = hash_func((canon_prefix, tokens_tuple, canon_extra))
     /// ```
     ///
     /// CBOR 编码规则（与 Python cbor2 一致）：
@@ -241,34 +280,74 @@ impl TokenHasher {
     /// - Python int → CBOR unsigned integer (major type 0)
     /// - Python str → CBOR text string (major type 3)
     /// - Python None → CBOR null (0xf6)
+    fn cbor_write_major_u64(out: &mut Vec<u8>, major: u8, value: u64) {
+        debug_assert!(major <= 7);
+        if value <= 23 {
+            out.push((major << 5) | value as u8);
+        } else if value <= u8::MAX as u64 {
+            out.push((major << 5) | 24);
+            out.push(value as u8);
+        } else if value <= u16::MAX as u64 {
+            out.push((major << 5) | 25);
+            out.extend_from_slice(&(value as u16).to_be_bytes());
+        } else if value <= u32::MAX as u64 {
+            out.push((major << 5) | 26);
+            out.extend_from_slice(&(value as u32).to_be_bytes());
+        } else {
+            out.push((major << 5) | 27);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+
+    fn cbor_write_text(out: &mut Vec<u8>, value: &str) {
+        Self::cbor_write_major_u64(out, 3, value.len() as u64);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn cbor_write_bytes(out: &mut Vec<u8>, value: &[u8]) {
+        Self::cbor_write_major_u64(out, 2, value.len() as u64);
+        out.extend_from_slice(value);
+    }
+
     fn sha256_cbor_hash(
         &self,
         tokens: &[u32],
         prefix_hash: Option<&HashValue>,
         extra_keys: Option<&[String]>,
     ) -> HashValue {
-        let prefix_cbor = match prefix_hash {
-            Some(hash) => CborValue::Bytes(match hash {
+        // vLLM canonicalize:
+        // - prefix_hash: bytes or NONE_HASH if None
+        // - tokens: tuple[int, ...]
+        // - extra_keys: tuple[Any, ...], empty tuple if None
+        let canon_prefix_bytes = match prefix_hash {
+            Some(hash) => match hash {
                 HashValue::U64(v) => v.to_be_bytes().to_vec(),
                 HashValue::U256(bytes) => bytes.to_vec(),
-            }),
-            None => CborValue::Null,
+            },
+            None => match &self.none_hash {
+                HashValue::U64(v) => v.to_be_bytes().to_vec(),
+                HashValue::U256(bytes) => bytes.to_vec(),
+            },
         };
 
-        let tokens_cbor = CborValue::Array(
-            tokens.iter().map(|&t| CborValue::Integer(t as i128)).collect()
-        );
-
-        let extra_keys_cbor = match extra_keys {
-            Some(keys) => CborValue::Array(
-                keys.iter().map(|k| CborValue::Text(k.clone())).collect()
-            ),
-            None => CborValue::Null,
-        };
-
-        let input = CborValue::Array(vec![prefix_cbor, tokens_cbor, extra_keys_cbor]);
-        let cbor_bytes = serde_cbor::to_vec(&input)
-            .expect("Failed to CBOR encode hash input");
+        // Encode tuple(canon_prefix:int, tokens:tuple[int], extra_keys:tuple[str])
+        // using canonical CBOR form.
+        let mut cbor_bytes = Vec::with_capacity(64 + tokens.len() * 5);
+        // outer tuple: length 3
+        Self::cbor_write_major_u64(&mut cbor_bytes, 4, 3);
+        // canon_prefix
+        Self::cbor_write_bytes(&mut cbor_bytes, &canon_prefix_bytes);
+        // tokens tuple
+        Self::cbor_write_major_u64(&mut cbor_bytes, 4, tokens.len() as u64);
+        for &token in tokens {
+            Self::cbor_write_major_u64(&mut cbor_bytes, 0, token as u64);
+        }
+        // extra_keys tuple (empty when None)
+        let keys = extra_keys.unwrap_or(&[]);
+        Self::cbor_write_major_u64(&mut cbor_bytes, 4, keys.len() as u64);
+        for key in keys {
+            Self::cbor_write_text(&mut cbor_bytes, key);
+        }
 
         HashValue::U256(Sha256::digest(&cbor_bytes).into())
     }
@@ -405,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_hash_tokens_with_blocks_all() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
         
         let results = hasher.hash_tokens_with_blocks_all(&tokens, 2);
@@ -421,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_builtin_hash_u32() {
-        let hasher = TokenHasher::new(HashAlgorithm::Builtin, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Builtin, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3];
         
         let hash = hasher.hash_tokens(&tokens, None, None);
@@ -431,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_cross_language_hasher() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3];
         
         let hash = hasher.hash_tokens(&tokens, None, None);
@@ -447,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_cross_language_hash_with_extra_keys() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3];
         let extra_keys = vec!["key1".to_string(), "key2".to_string()];
         
@@ -462,7 +541,7 @@ mod tests {
     #[test]
     fn test_cross_language_hash_v2_none_hash() {
         // Test NONE_HASH: 现在是全零的 32 字节
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0, None).unwrap();
         let hash = hasher.get_init_hash();
         
         let expected = [0u8; 32];
@@ -479,7 +558,7 @@ mod tests {
     fn test_cross_language_hash_v2_with_tokens() {
         // Test: (全零 prefix_hash, [1, 2, 3], None)
         // 由于 prefix_hash 改为全零，期望值会不同
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3];
         let hash = hasher.hash_tokens(&tokens, None, None);
         
@@ -496,7 +575,7 @@ mod tests {
     #[test]
     fn test_cross_language_hash_v2_with_prefix() {
         // Test iterative hashing
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0);
+        let hasher = TokenHasher::new(HashAlgorithm::Sha256CrossLanguage, false, 0, None).unwrap();
         
         // Initial hash 现在是全零
         let mut current_hash = hasher.get_init_hash();
@@ -521,117 +600,108 @@ mod tests {
         assert!(matches!(current_hash, HashValue::U256(_)));
     }
 
-    // ===== Sha256Cbor tests (cross-language compatible with Python cbor2) =====
-
-    #[test]
-    fn test_sha256_cbor_none_hash_cbor_encoding() {
-        // cbor2.dumps(None) == b'\xf6' (CBOR null)
-        let cbor_bytes = serde_cbor::to_vec(&CborValue::Null).unwrap();
-        assert_eq!(cbor_bytes, vec![0xf6], "CBOR encoding of None must be 0xf6");
-    }
+    // ===== Sha256Cbor tests (strictly aligned with vLLM canonicalize semantics) =====
 
     #[test]
     fn test_sha256_cbor_none_hash() {
-        // Python: hashlib.sha256(cbor2.dumps(None)).hexdigest()
-        // cbor2.dumps(None) = b'\xf6', SHA256(b'\xf6') = "b0b2988b..."
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
+        // Python(vLLM >= PR#20511): hashlib.sha256(cbor2.dumps("0", canonical=True)).hexdigest()
+        let hasher = TokenHasher::new(
+            HashAlgorithm::Sha256Cbor,
+            false,
+            0,
+            Some("0".to_string()),
+        )
+        .unwrap();
         let none_hash = hasher.get_init_hash();
-        let bytes = none_hash.as_u256().unwrap();
-        let hex_str = hex::encode(bytes);
         assert_eq!(
-            hex_str,
-            "b0b2988b6bbe724bacda5e9e524736de0bc7dae41c46b4213c50e1d35d4e5f13",
-            "NONE_HASH must match Python: SHA256(cbor2.dumps(None))"
+            hex::encode(none_hash.as_u256().unwrap()),
+            "4e1195df020de59e0d65a33a4279f1183e7ae4e5d980e309f8b55adff2e61c3e"
         );
     }
 
     #[test]
-    fn test_sha256_cbor_tuple_encoding() {
-        // Verify the CBOR encoding of (NONE_HASH_bytes, (1, 2, 3), None)
-        // matches Python: cbor2.dumps((none_hash, (1, 2, 3), None))
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
+    fn test_sha256_cbor_vectors_vllm_canonicalize() {
+        // Python reference:
+        // NONE_HASH = sha256(cbor2.dumps("0", canonical=True)).digest()
+        // canon_prefix = prefix if prefix is not None else NONE_HASH
+        // canon_extra = tuple(extra_keys) if extra_keys is not None else ()
+        // sha256(cbor2.dumps((canon_prefix, tokens_tuple, canon_extra), canonical=True))
+        let hasher = TokenHasher::new(
+            HashAlgorithm::Sha256Cbor,
+            false,
+            0,
+            Some("0".to_string()),
+        )
+        .unwrap();
         let none_hash = hasher.get_init_hash();
-        let none_bytes = none_hash.as_u256().unwrap();
 
-        let prefix_cbor = CborValue::Bytes(none_bytes.to_vec());
-        let tokens_cbor = CborValue::Array(vec![
-            CborValue::Integer(1),
-            CborValue::Integer(2),
-            CborValue::Integer(3),
-        ]);
-        let extra_keys_cbor = CborValue::Null;
-        let input = CborValue::Array(vec![prefix_cbor, tokens_cbor, extra_keys_cbor]);
-        let cbor_bytes = serde_cbor::to_vec(&input).unwrap();
+        let tokens = vec![1u32, 2, 3];
+        let h1 = hasher.hash_tokens(&tokens, None, None);
+        assert_eq!(
+            hex::encode(h1.as_u256().unwrap()),
+            "8850135ef1d7b33ac0b6e79034c039d9eb7beea6fc15fa9d826602f68aa4fb2d"
+        );
 
-        // CBOR structure: 83 (array of 3)
-        //   58 20 <32 bytes> (byte string, length 32)
-        //   83 01 02 03     (array of 3: 1, 2, 3)
-        //   f6              (null)
-        assert_eq!(cbor_bytes[0], 0x83, "outer array header");
-        assert_eq!(cbor_bytes[1], 0x58, "byte string, 1-byte length");
-        assert_eq!(cbor_bytes[2], 0x20, "byte string length = 32");
-        // bytes 3..35: the 32-byte hash
-        assert_eq!(&cbor_bytes[3..35], &none_bytes[..]);
-        assert_eq!(cbor_bytes[35], 0x83, "inner array header for tokens");
-        assert_eq!(cbor_bytes[36], 0x01, "token 1");
-        assert_eq!(cbor_bytes[37], 0x02, "token 2");
-        assert_eq!(cbor_bytes[38], 0x03, "token 3");
-        assert_eq!(cbor_bytes[39], 0xf6, "null for extra_keys");
-        assert_eq!(cbor_bytes.len(), 40);
+        let h1_again = hasher.hash_tokens(&tokens, Some(&none_hash), None);
+        assert_eq!(
+            h1, h1_again,
+            "prefix_hash=None should canonicalize to NONE_HASH"
+        );
+
+        let h2 = hasher.hash_tokens(&tokens, Some(&h1), None);
+        assert_eq!(
+            hex::encode(h2.as_u256().unwrap()),
+            "591c98efd5e0e3ef3dc9dab9254b7320ec1fa3f7df36b6bb80e0e03155cffbd5"
+        );
+
+        let tokens2 = vec![100u32, 200, 300, 65536];
+        let h3 = hasher.hash_tokens(&tokens2, None, None);
+        assert_eq!(
+            hex::encode(h3.as_u256().unwrap()),
+            "5130c2619f8d44aeae1a44df83b3670ba625318e1067b3bf317cebf7712f7a35"
+        );
+
+        let extra_keys = vec!["image_hash:abc123".to_string()];
+        let h4 = hasher.hash_tokens(&tokens, None, Some(&extra_keys));
+        assert_eq!(
+            hex::encode(h4.as_u256().unwrap()),
+            "4186905812c6277a0d7d00e27740140ea7d60be1d75066097331b40dc144b40d"
+        );
     }
 
     #[test]
-    fn test_sha256_cbor_hash_with_tokens() {
-        // Python equivalent:
-        //   import cbor2, hashlib
-        //   hash_func = lambda x: hashlib.sha256(cbor2.dumps(x)).digest()
-        //   none_hash = hash_func(None)
-        //   result = hash_func((none_hash, (1, 2, 3), None))
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let none_hash = hasher.get_init_hash();
-        let tokens: Vec<u32> = vec![1, 2, 3];
-        let hash = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-
-        assert!(matches!(hash, HashValue::U256(_)));
-        // The hash should be deterministic
-        let hash2 = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        assert_eq!(hash, hash2);
+    fn test_sha256_cbor_extra_keys_none_equals_empty_tuple() {
+        let hasher = TokenHasher::new(
+            HashAlgorithm::Sha256Cbor,
+            false,
+            0,
+            Some("0".to_string()),
+        )
+        .unwrap();
+        let tokens = vec![1u32, 2, 3];
+        let empty: Vec<String> = vec![];
+        let h_none = hasher.hash_tokens(&tokens, None, None);
+        let h_empty = hasher.hash_tokens(&tokens, None, Some(&empty));
+        assert_eq!(h_none, h_empty);
     }
 
     #[test]
-    fn test_sha256_cbor_hash_different_with_different_prefix() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let none_hash = hasher.get_init_hash();
-        let tokens: Vec<u32> = vec![1, 2, 3];
-
-        let hash1 = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        let hash2 = hasher.hash_tokens(&tokens, Some(&hash1), None);
-        assert_ne!(hash1, hash2, "Different prefix_hash must produce different results");
-    }
-
-    #[test]
-    fn test_sha256_cbor_iterative_hashing() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let mut current_hash = hasher.get_init_hash();
-
-        let blocks: Vec<Vec<u32>> = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
-        let mut intermediate_hashes = vec![];
-
-        for block in &blocks {
-            current_hash = hasher.hash_tokens(block, Some(&current_hash), None);
-            intermediate_hashes.push(current_hash.clone());
-        }
-
-        assert_eq!(intermediate_hashes.len(), 3);
-        // All intermediate hashes should be distinct
-        assert_ne!(intermediate_hashes[0], intermediate_hashes[1]);
-        assert_ne!(intermediate_hashes[1], intermediate_hashes[2]);
-        assert_ne!(intermediate_hashes[0], intermediate_hashes[2]);
+    fn test_sha256_cbor_requires_pythonhashseed() {
+        let err = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0, None)
+            .err()
+            .expect("sha256_cbor should fail without PYTHONHASHSEED");
+        assert_eq!(err, HashInitError::MissingPythonHashSeedForSha256Cbor);
     }
 
     #[test]
     fn test_sha256_cbor_blocks_all() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
+        let hasher = TokenHasher::new(
+            HashAlgorithm::Sha256Cbor,
+            false,
+            0,
+            Some("0".to_string()),
+        )
+        .unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
         let results = hasher.hash_tokens_with_blocks_all(&tokens, 2);
 
@@ -640,80 +710,10 @@ mod tests {
         assert_eq!(results[1].1, 2);
         assert_eq!(results[2].1, 2);
 
-        // Verify consistency: manual iterative hash should equal block hash
         let mut current_hash = hasher.get_init_hash();
         for (i, chunk) in tokens.chunks(2).enumerate() {
             current_hash = hasher.hash_tokens(chunk, Some(&current_hash), None);
             assert_eq!(current_hash, results[i].0, "Block {} hash mismatch", i);
         }
-    }
-
-    #[test]
-    fn test_sha256_cbor_with_extra_keys() {
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let none_hash = hasher.get_init_hash();
-        let tokens: Vec<u32> = vec![1, 2, 3];
-        let extra_keys = vec!["key1".to_string(), "key2".to_string()];
-
-        let hash_without = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        let hash_with = hasher.hash_tokens(&tokens, Some(&none_hash), Some(&extra_keys));
-        // extra_keys are encoded in CBOR, so they SHOULD produce different hashes
-        assert_ne!(hash_without, hash_with, "extra_keys must affect the hash");
-    }
-
-    #[test]
-    fn test_sha256_cbor_with_none_prefix() {
-        // When prefix_hash is None (not provided), encode as CBOR null in the tuple
-        // Python: hash_func((None, (1, 2, 3), None))
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let tokens: Vec<u32> = vec![1, 2, 3];
-
-        let hash = hasher.hash_tokens(&tokens, None, None);
-        assert!(matches!(hash, HashValue::U256(_)));
-
-        // This should differ from using NONE_HASH as prefix (bytes vs null in CBOR)
-        let none_hash = hasher.get_init_hash();
-        let hash_with_none_hash = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        assert_ne!(hash, hash_with_none_hash,
-            "None prefix (CBOR null) vs NONE_HASH prefix (CBOR bytes) must differ");
-    }
-
-    #[test]
-    fn test_sha256_cbor_large_token_encoding() {
-        // Verify CBOR encoding of large token values (> 255, > 65535)
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-        let none_hash = hasher.get_init_hash();
-        let tokens: Vec<u32> = vec![0, 23, 24, 255, 256, 65535, 65536, u32::MAX];
-
-        let hash = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        assert!(matches!(hash, HashValue::U256(_)));
-
-        // Deterministic
-        let hash2 = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        assert_eq!(hash, hash2);
-    }
-
-    #[test]
-    fn test_sha256_cbor_print_test_vectors() {
-        // Print test vectors for cross-language verification with Python
-        let hasher = TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0);
-
-        let none_hash = hasher.get_init_hash();
-        println!("NONE_HASH = {}", hex::encode(none_hash.as_u256().unwrap()));
-
-        let tokens = vec![1u32, 2, 3];
-        let hash1 = hasher.hash_tokens(&tokens, Some(&none_hash), None);
-        println!("hash((NONE_HASH, (1,2,3), None)) = {}", hex::encode(hash1.as_u256().unwrap()));
-
-        let hash2 = hasher.hash_tokens(&tokens, Some(&hash1), None);
-        println!("hash((hash1, (1,2,3), None)) = {}", hex::encode(hash2.as_u256().unwrap()));
-
-        let tokens2 = vec![100u32, 200, 300, 65536];
-        let hash3 = hasher.hash_tokens(&tokens2, Some(&none_hash), None);
-        println!("hash((NONE_HASH, (100,200,300,65536), None)) = {}", hex::encode(hash3.as_u256().unwrap()));
-
-        let extra_keys = vec!["image_hash:abc123".to_string()];
-        let hash4 = hasher.hash_tokens(&tokens, Some(&none_hash), Some(&extra_keys));
-        println!("hash((NONE_HASH, (1,2,3), ('image_hash:abc123',))) = {}", hex::encode(hash4.as_u256().unwrap()));
     }
 }
