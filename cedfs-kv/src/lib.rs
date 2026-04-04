@@ -931,7 +931,10 @@ impl Shared {
         // 3) 顺序门控：第一个 concurrency < replica_count*2 之后全部截断
         let mut gated_hashes: Vec<([u8; 32], u32, u64)> = Vec::new();
         for (token_hash, offset, concurrency, replica_count) in known_hash_with_state {
-            if concurrency < replica_count.saturating_mul(2) {
+            // if concurrency < replica_count.saturating_mul(2) {
+            //     break;
+            // }
+            if concurrency < 2 {
                 break;
             }
             gated_hashes.push((token_hash, offset, concurrency));

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::types::DataServer;
 use crate::Shared;
 
-const MIGRATION_TRIGGER_THRESHOLD: u64 = 3;
+const MIGRATION_TRIGGER_THRESHOLD: u64 = 2;
 const MIGRATION_COOLDOWN_SECS: u64 = 60;
 
 pub struct NewRequestOp {
@@ -15,14 +15,14 @@ pub struct NewRequestOp {
 
 impl NewRequestOp {
     async fn resolve_source_server(&self) -> Option<DataServer> {
-        if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&self.server_id) {
-            let meta_id = *meta_server_id;
-            if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
-                if let Some(server) = data_servers.iter().find(|ds| ds.id == self.server_id) {
-                    return Some(server.clone());
-                }
-            }
-        }
+        // if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&self.server_id) {
+        //     let meta_id = *meta_server_id;
+        //     if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
+        //         if let Some(server) = data_servers.iter().find(|ds| ds.id == self.server_id) {
+        //             return Some(server.clone());
+        //         }
+        //     }
+        // }
 
         let local_servers = self.shared.local_data_server_collect.read().await;
         local_servers
@@ -41,6 +41,13 @@ impl NewRequestOp {
             .map(|(hash, _offset)| hash.to_u256())
             .collect();
 
+        // tracing::info!(
+        //     "New Request - server_id: {}, blocks: {}, hashes: {:?}",
+        //     self.server_id,
+        //     token_hashes.len(),
+        //     token_hashes.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
+        // );
+
         let _expired = self
             .shared
             .active_squence
@@ -51,7 +58,7 @@ impl NewRequestOp {
             .iter()
             .zip(hold_counts.iter())
             .filter_map(|(token_hash, hold)| {
-                if *hold > MIGRATION_TRIGGER_THRESHOLD {
+                if *hold >= MIGRATION_TRIGGER_THRESHOLD {
                     Some((*token_hash, *hold))
                 } else {
                     None
@@ -59,13 +66,14 @@ impl NewRequestOp {
             })
             .collect();
 
-        if !high_hold_blocks.is_empty() {
-            tracing::debug!(
-                "NewRequestOp: request_id={}, high-hold blocks (hold>{}) = {:?}",
+        if high_hold_blocks.is_empty() {
+            tracing::info!(
+                "NewRequestOp: request_id={}, high-hold blocks (hold<{}) = {:?}",
                 self.request_id,
                 MIGRATION_TRIGGER_THRESHOLD,
                 high_hold_blocks
             );
+            return Ok(())
         }
 
         let cooldown = Duration::from_secs(MIGRATION_COOLDOWN_SECS);
@@ -81,7 +89,7 @@ impl NewRequestOp {
             .collect();
 
         if eligible_blocks.is_empty() {
-            tracing::debug!(
+            tracing::info!(
                 "NewRequestOp: request_id={} has no migration-eligible blocks after cooldown",
                 self.request_id
             );
