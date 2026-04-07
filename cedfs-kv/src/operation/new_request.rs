@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::types::DataServer;
-use crate::Shared;
+use crate::{PendingMigrationTask, Shared};
 
 const MIGRATION_TRIGGER_THRESHOLD: u64 = 2;
 const MIGRATION_COOLDOWN_SECS: u64 = 60;
@@ -32,6 +32,14 @@ impl NewRequestOp {
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
+        let expired_count = self.shared.cleanup_expired_pending_migrations();
+        if expired_count > 0 {
+            tracing::debug!(
+                "NewRequestOp: cleaned {} expired pending migration task(s) before enqueue",
+                expired_count
+            );
+        }
+
         let hash_results = self
             .shared
             .hasher
@@ -67,7 +75,7 @@ impl NewRequestOp {
             .collect();
 
         if high_hold_blocks.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 "NewRequestOp: request_id={}, high-hold blocks (hold<{}) = {:?}",
                 self.request_id,
                 MIGRATION_TRIGGER_THRESHOLD,
@@ -105,15 +113,15 @@ impl NewRequestOp {
             return Ok(());
         };
 
-        let migration_result = self
-            .shared
-            .migrate_hash_seq_with_rr_target(&source_server, &eligible_blocks)
-            .await?;
-        tracing::info!(
-            "NewRequestOp: request_id={} migration result: {:?}",
-            self.request_id,
-            migration_result
-        );
+        // let pending_task = PendingMigrationTask::new(source_server.id, eligible_blocks.clone());
+        // self.shared
+        //     .upsert_pending_migration_task(self.request_id.clone(), pending_task);
+        // tracing::info!(
+        //     "NewRequestOp: request_id={} queued pending migration: source_server_id={}, blocks={}",
+        //     self.request_id,
+        //     source_server.id,
+        //     eligible_blocks.len()
+        // );
 
         tracing::debug!("NewRequestOp: added request {}", self.request_id);
         Ok(())

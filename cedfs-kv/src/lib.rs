@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -28,6 +29,31 @@ pub mod network;
 pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
+
+pub const PENDING_MIGRATION_TTL_SECS: u64 = 60;
+
+#[derive(Debug, Clone)]
+pub struct PendingMigrationTask {
+    pub source_server_id: u32,
+    pub eligible_blocks: Vec<([u8; 32], u64)>,
+    pub created_at: Instant,
+    pub ttl: Duration,
+}
+
+impl PendingMigrationTask {
+    pub fn new(source_server_id: u32, eligible_blocks: Vec<([u8; 32], u64)>) -> Self {
+        Self {
+            source_server_id,
+            eligible_blocks,
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(PENDING_MIGRATION_TTL_SECS),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > self.ttl
+    }
+}
 
 #[derive(Clone)]
 pub struct Shared {
@@ -81,6 +107,9 @@ pub struct Shared {
 
     // 迁移目标节点轮转索引（用于在候选目标中做 round-robin）
     pub migration_target_rr_index: Arc<AtomicUsize>,
+
+    // 待执行的迁移任务（按 request_id 缓存，延后到 request_end 执行）
+    pub pending_migrations: Arc<DashMap<String, PendingMigrationTask>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -175,6 +204,7 @@ impl KVServer {
                     recent_migrations: Arc::new(DashMap::new()),
                     active_squence,
                     migration_target_rr_index: Arc::new(AtomicUsize::new(0)),
+                    pending_migrations: Arc::new(DashMap::new()),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -210,6 +240,42 @@ impl KVServer {
 }
 
 impl Shared {
+    pub fn upsert_pending_migration_task(
+        &self,
+        request_id: String,
+        task: PendingMigrationTask,
+    ) {
+        self.pending_migrations.insert(request_id, task);
+    }
+
+    pub fn pop_pending_migration_task(&self, request_id: &str) -> Option<PendingMigrationTask> {
+        self.pending_migrations
+            .remove(request_id)
+            .map(|(_request_id, task)| task)
+    }
+
+    pub fn cleanup_expired_pending_migrations(&self) -> usize {
+        let expired_request_ids: Vec<String> = self
+            .pending_migrations
+            .iter()
+            .filter_map(|entry| {
+                if entry.value().is_expired() {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut removed = 0usize;
+        for request_id in expired_request_ids {
+            if self.pending_migrations.remove(&request_id).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// 将 token_hash 转为 16 进制字符串（无 0x 前缀）
     fn token_hash_to_hex(token_hash: &[u8; 32]) -> String {
         let mut s = String::with_capacity(64);
