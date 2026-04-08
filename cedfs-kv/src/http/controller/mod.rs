@@ -51,20 +51,6 @@ impl Drop for InferenceLoadGuard {
     }
 }
 
-/// 请求结束时自动对本次涉及的 token_hashes 做 concurrency_counter 扣减
-struct TokenConcurrencyGuard {
-    shared: Arc<Shared>,
-    token_hashes: Vec<[u8; 32]>,
-}
-
-impl Drop for TokenConcurrencyGuard {
-    fn drop(&mut self) {
-        for &h in &self.token_hashes {
-            self.shared.concurrency_counter.decrement(h);
-        }
-    }
-}
-
 /// 客户端 POST 的 JSON 请求体
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferRequest {
@@ -238,27 +224,8 @@ pub async fn infer(
         prompt_len,
     };
 
-    // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    let _token_guard = {
-        if !hashes.is_empty() {
-            let replica_counts = shared.get_replica_counts(hashes.clone());
-            let items: Vec<([u8; 32], u32)> = hashes
-                .iter()
-                .zip(replica_counts.iter())
-                .map(|(&h, &r)| (h, r))
-                .collect();
-            shared.increment_concurrency_and_maybe_migrate(&items);
-            Some(TokenConcurrencyGuard {
-                shared: shared.clone(),
-                token_hashes: hashes.clone(),
-            })
-        } else {
-            None
-        }
-    };
-
     //todo()错误处理
-    let url = server.url;
+    let url = server.url.clone();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -323,6 +290,25 @@ pub async fn infer(
         )
     })?;
 
+    if !hashes.is_empty() {
+        let shared_for_migration = shared.clone();
+        let request_server = server.clone();
+        let token_hashes = hashes.clone();
+        tokio::spawn(async move {
+            let replica_counts = shared_for_migration.get_replica_counts(token_hashes.clone());
+            let items: Vec<([u8; 32], u32)> = token_hashes
+                .iter()
+                .zip(replica_counts.iter())
+                .map(|(&h, &r)| (h, r))
+                .collect();
+            shared_for_migration
+                .increment_concurrency_and_maybe_migrate(&items, request_server);
+            for token_hash in token_hashes {
+                shared_for_migration.concurrency_counter.decrement(token_hash);
+            }
+        });
+    }
+
     Ok(Json(result))
 }
 
@@ -375,25 +361,6 @@ pub async fn performance(
         tracker: shared.inference_load_tracker.clone(),
         server_key: server.id,
         prompt_len,
-    };
-
-    // 使用调度阶段已计算的 token_hashes，请求开始 +1，请求结束由 guard 扣减
-    let _token_guard = {
-        if !hashes.is_empty() {
-            let replica_counts = shared.get_replica_counts(hashes.clone());
-            let items: Vec<([u8; 32], u32)> = hashes
-                .iter()
-                .zip(replica_counts.iter())
-                .map(|(&h, &r)| (h, r))
-                .collect();
-            shared.increment_concurrency_and_maybe_migrate(&items);
-            Some(TokenConcurrencyGuard {
-                shared: shared.clone(),
-                token_hashes: hashes.clone(),
-            })
-        } else {
-            None
-        }
     };
 
     // 创建 async-openai client
@@ -537,6 +504,25 @@ pub async fn performance(
         .unwrap_or_else(Instant::now)
         .duration_since(start_time)
         .as_secs_f64();
+
+    if !hashes.is_empty() {
+        let shared_for_migration = shared.clone();
+        let request_server = server.clone();
+        let token_hashes = hashes.clone();
+        tokio::spawn(async move {
+            let replica_counts = shared_for_migration.get_replica_counts(token_hashes.clone());
+            let items: Vec<([u8; 32], u32)> = token_hashes
+                .iter()
+                .zip(replica_counts.iter())
+                .map(|(&h, &r)| (h, r))
+                .collect();
+            shared_for_migration
+                .increment_concurrency_and_maybe_migrate(&items, request_server);
+            for token_hash in token_hashes {
+                shared_for_migration.concurrency_counter.decrement(token_hash);
+            }
+        });
+    }
 
     Ok(Json(PerformanceResponse {
         success: true,

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -828,65 +829,131 @@ impl Shared {
 
     pub async fn intra_domain_transfer(
         &self,
-        token_hash: &[u8; 32],
-    ) -> Option<([u8; 32], u32, DataServer, DataServer)> {
+        token_hashes: &[[u8; 32]],
+        request_server: &DataServer,
+    ) -> Option<(DataServer, DataServer, Vec<([u8; 32], u32)>)> {
         let global_kvcache_table = &self.global_kvcache_table;
         let local_data_servers = self.local_data_server_collect.read().await;
 
-        let kv_meta = global_kvcache_table.get(token_hash)?;
-        let offset = kv_meta.offset;
+        if !local_data_servers.iter().any(|ds| ds.id == request_server.id) {
+            tracing::warn!(
+                "Skip migration: request_server {} not found in local_data_servers",
+                request_server.id
+            );
+            return None;
+        }
 
-        let source = local_data_servers
-            .iter()
-            .find(|ds| kv_meta.server_id.contains(&ds.id))?;
-        let target = local_data_servers
-            .iter()
-            .find(|ds| !kv_meta.server_id.contains(&ds.id))?;
+        let mut target: Option<DataServer> = None;
+        for token_hash in token_hashes {
+            let Some(kv_meta) = global_kvcache_table.get(token_hash) else {
+                continue;
+            };
+            let candidates: Vec<DataServer> = local_data_servers
+                .iter()
+                .filter(|ds| ds.id != request_server.id && !kv_meta.server_id.contains(&ds.id))
+                .cloned()
+                .collect();
+            if !candidates.is_empty() {
+                let idx_seed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() as usize)
+                    .unwrap_or(0);
+                target = candidates.get(idx_seed % candidates.len()).cloned();
+                break;
+            }
+        }
 
-        let hex = Shared::token_hash_to_hex(token_hash);
-        tracing::info!(
-            "Intra-domain transfer: token_hash 0x{}, replicas: {}, source: {}, target: {}",
-            hex,
-            kv_meta.server_id.len(),
-            source.id,
-            target.id
-        );
-        Some((*token_hash, offset, source.clone(), target.clone()))
+        let Some(target_server) = target else {
+            tracing::info!(
+                "Skip migration: all local_data_servers already hold all candidate blocks"
+            );
+            return None;
+        };
+
+        let mut migrate_blocks = Vec::new();
+        for token_hash in token_hashes {
+            let Some(kv_meta) = global_kvcache_table.get(token_hash) else {
+                continue;
+            };
+            if !kv_meta.server_id.contains(&request_server.id) {
+                continue;
+            }
+            if kv_meta.server_id.contains(&target_server.id) {
+                continue;
+            }
+            migrate_blocks.push((*token_hash, kv_meta.offset));
+        }
+
+        if migrate_blocks.is_empty() {
+            tracing::info!(
+                "Skip migration: no blocks can move from source {} to target {}",
+                request_server.id,
+                target_server.id
+            );
+            return None;
+        }
+
+        Some((request_server.clone(), target_server, migrate_blocks))
     }
 
-    /// 执行单次 KV 块迁移（与 client 中 execute_kv_migration 单条逻辑一致）
-    pub async fn execute_single_kv_migration(
+    /// 执行批量 KV 块迁移，使用一条 gRPC 请求携带多个 offsets
+    pub async fn execute_batch_kv_migration(
         &self,
-        (token_hash, offset, src_server, dst_server): ([u8; 32], u32, DataServer, DataServer),
+        src_server: DataServer,
+        dst_server: DataServer,
+        migrate_blocks: Vec<([u8; 32], u32)>,
     ) -> anyhow::Result<()> {
+        if migrate_blocks.is_empty() {
+            return Ok(());
+        }
         let url = format!("http://{}:{}", src_server.ip, src_server.rpc_port);
         let client = TransferKvOp::new(&url);
         let position = "LocalCPUBackend".to_string();
+        let request_hash = migrate_blocks[0].0.to_vec();
+        let offsets: Vec<u32> = migrate_blocks.iter().map(|(_, offset)| *offset).collect();
+        tracing::info!(
+            "Batch migration detail: source={}, target={}, offset_count={}",
+            src_server.id,
+            dst_server.id,
+            offsets.len()
+        );
         let response = client
             .send_transfer_request(
-                token_hash.to_vec(),
+                request_hash,
                 position,
-                vec![offset],
+                offsets.clone(),
                 dst_server.ip.to_string(),
                 dst_server.init_port as i32,
                 true,
             )
             .await?;
         if response.status > 0 {
-            self.update_kv_meta_after_migration(token_hash, dst_server.id)
-                .await;
+            for (token_hash, _) in &migrate_blocks {
+                self.update_kv_meta_after_migration(*token_hash, dst_server.id)
+                    .await;
+            }
             tracing::info!(
-                "Successfully transferred KV block (concurrency-triggered) from server {} to server {}",
+                "Successfully transferred {} KV blocks (concurrency-triggered) from server {} to server {}",
+                migrate_blocks.len(),
                 src_server.id,
                 dst_server.id
             );
         } else if response.status == -1 {
             tracing::warn!(
-                "KV cache not found on server {}, removing from metadata for token_hash {:?}",
+                "KV cache not found on server {}, removing metadata for {} blocks",
                 src_server.id,
-                token_hash
+                migrate_blocks.len()
             );
-            self.remove_server_from_kv_meta(token_hash, src_server.id);
+            for (token_hash, _) in &migrate_blocks {
+                self.remove_server_from_kv_meta(*token_hash, src_server.id);
+            }
+        } else {
+            tracing::warn!(
+                "Batch migration returned non-positive status {}, source {}, target {}",
+                response.status,
+                src_server.id,
+                dst_server.id
+            );
         }
         Ok(())
     }
@@ -908,59 +975,89 @@ impl Shared {
         self.insert_update_kvop(update_op);
     }
 
-    /// 若 concurrent_count > replica_count*2 时，可调用此方法：对单个 token_hash 尝试域内迁移并执行
-    pub async fn try_trigger_intra_domain_migration_for_token(
-        &self,
-        token_hash: [u8; 32],
-    ) {
-        if let Some(transfer_item) = self.intra_domain_transfer(&token_hash).await {
-            if let Err(e) = self.execute_single_kv_migration(transfer_item).await {
-                let hex = Shared::token_hash_to_hex(&token_hash);
-                tracing::warn!(
-                    "Concurrency-triggered intra-domain migration failed for token_hash 0x{}: {:?}",
-                    hex,
-                    e
-                );
-            }
-        }
-    }
-
     /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移。
     /// 为避免抖动，对同一 token_hash 在短时间内的重复迁移会被抑制。
-    pub fn increment_concurrency_and_maybe_migrate(&self, items: &[([u8; 32], u32)]) {
-        let to_migrate = self.concurrency_counter.batch_increment(items);
+    pub fn increment_concurrency_and_maybe_migrate(
+        &self,
+        items: &[([u8; 32], u32)],
+        request_server: DataServer,
+    ) {
         let now = std::time::Instant::now();
         let cooldown = std::time::Duration::from_secs(5);
+        let mut to_migrate = Vec::new();
+        let mut prefix_break_index: Option<usize> = None;
+        let mut prefix_break_hash: Option<[u8; 32]> = None;
 
-        for token_hash in to_migrate {
-            let mut should_spawn = false;
+        // 前缀短路：遇到第一个不满足迁移条件的块后，后续块不再迁移
+        for (idx, &(token_hash, replica_count)) in items.iter().enumerate() {
+            let should_migrate = self.concurrency_counter.increment(token_hash, replica_count);
+            if !should_migrate {
+                prefix_break_index = Some(idx);
+                prefix_break_hash = Some(token_hash);
+                break;
+            }
+            let mut should_enqueue = false;
 
             if let Some(mut entry) = self.recent_migrations.get_mut(&token_hash) {
                 // 已有迁移记录，检查是否超过冷却时间
                 if now.duration_since(*entry) >= cooldown {
                     *entry = now;
-                    should_spawn = true;
+                    should_enqueue = true;
                 }
             } else {
                 // 首次迁移该 token_hash，记录时间并允许迁移
                 self.recent_migrations.insert(token_hash, now);
-                should_spawn = true;
+                should_enqueue = true;
             }
 
-            if should_spawn {
+            if should_enqueue {
                 let hex = Shared::token_hash_to_hex(&token_hash);
                 tracing::info!(
                     "Concurrency-triggered intra-domain migration scheduled for token_hash 0x{}",
                     hex
                 );
-                let shared = self.clone();
-                tokio::spawn(async move {
-                    shared
-                        .try_trigger_intra_domain_migration_for_token(token_hash)
-                        .await;
-                });
+                to_migrate.push(token_hash);
             }
         }
+
+        if let Some(idx) = prefix_break_index {
+            let break_hash_hex = prefix_break_hash
+                .as_ref()
+                .map(Shared::token_hash_to_hex)
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::info!(
+                "Prefix short-circuit at index {} (token_hash=0x{}), scheduled_before_break={}, total_items={}",
+                idx,
+                break_hash_hex,
+                to_migrate.len(),
+                items.len()
+            );
+        }
+
+        if to_migrate.is_empty() {
+            return;
+        }
+
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let Some((src_server, dst_server, migrate_blocks)) = shared
+                .intra_domain_transfer(&to_migrate, &request_server)
+                .await
+            else {
+                return;
+            };
+            if let Err(e) = shared
+                .execute_batch_kv_migration(src_server.clone(), dst_server.clone(), migrate_blocks)
+                .await
+            {
+                tracing::warn!(
+                    "Concurrency-triggered batch migration failed from {} to {}: {:?}",
+                    src_server.id,
+                    dst_server.id,
+                    e
+                );
+            }
+        });
     }
 }
 
