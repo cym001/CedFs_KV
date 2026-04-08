@@ -155,7 +155,7 @@ impl KvCacheClient {
 
             match client
                 .send_transfer_request(
-                    token_hash,
+                    token_hash.to_vec(),
                     position,
                     vec![offset],
                     dst_server.ip.to_string(),
@@ -590,7 +590,7 @@ impl KvCacheClient {
 
             match client
                 .send_transfer_request(
-                    token_hash,
+                    token_hash.to_vec(),
                     position,
                     vec![offset],
                     dst_server.ip.to_string(),

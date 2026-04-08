@@ -62,12 +62,14 @@ service KvMeta2Data {
     rpc UploadKvMeta(UploadKvMetaRequest) returns (UploadKvMetaResponse);
     rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse);
     rpc RemoveKvMeta(RemoveKvMetaRequest) returns (RemoveKvMetaResponse);
+    rpc NewRequest(NewRequestRequest) returns (NewRequestResponse);
+    rpc RequestEnd(RequestEndRequest) returns (RequestEndResponse);
 }
 
 // 1.数据服务器向元数据服务器上传本地新增kvcache元数据
 message UploadKvMetaRequest {
     uint32 server_id = 1;
-    repeated uint32 tokens = 3; 
+    repeated uint32 tokens = 2; 
 }
 
 message UploadKvMetaResponse {
@@ -91,6 +93,28 @@ message RemoveKvMetaRequest {
 }
 
 message RemoveKvMetaResponse {
+    bool success = 1;
+}
+
+// 4.数据服务器向元数据服务器上传本地新增请求
+message NewRequestRequest {
+    uint32 server_id = 1;
+    string request_id = 2;
+    repeated uint32 tokens = 3; 
+}
+
+message NewRequestResponse {
+    bool success = 1;
+}
+
+// 5.数据服务器向元数据服务器上传本地请求结束
+message RequestEndRequest {
+    uint32 server_id = 1;
+    string request_id = 2;
+    repeated uint32 tokens = 3;  
+}
+
+message RequestEndResponse {
     bool success = 1;
 }
 

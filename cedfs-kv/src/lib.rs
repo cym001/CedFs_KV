@@ -118,7 +118,7 @@ impl KVServer {
                 }
                 let data_servers = Arc::new(RwLock::new(Vec::new()));
 
-                let algorithm = match config.hash_algorithm.clone().as_str() {
+                                let algorithm = match config.hash_algorithm.clone().as_str() {
                     "builtin" => HashAlgorithm::Builtin,
                     "sha256" => HashAlgorithm::Sha256,
                     "sha256_cbor" => HashAlgorithm::Sha256Cbor,
@@ -132,7 +132,12 @@ impl KVServer {
                     },
                 };
 
-                let hasher = TokenHasher::new(algorithm, config.unfull_chunk, config.hash_seed);
+                let hasher = TokenHasher::new(
+                    algorithm,
+                    config.unfull_chunk,
+                    config.hash_seed,
+                    config.python_hash_seed.clone(),
+                )?;
 
                 // 初始化TokenizerManager并预加载所有配置的tokenizer
                 let tokenizer_manager = Arc::new(
@@ -859,7 +864,7 @@ impl Shared {
         let position = "LocalCPUBackend".to_string();
         let response = client
             .send_transfer_request(
-                token_hash,
+                token_hash.to_vec(),
                 position,
                 vec![offset],
                 dst_server.ip.to_string(),
