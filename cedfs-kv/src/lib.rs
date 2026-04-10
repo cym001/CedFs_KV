@@ -119,7 +119,7 @@ impl KVServer {
                 }
                 let data_servers = Arc::new(RwLock::new(Vec::new()));
 
-                                let algorithm = match config.hash_algorithm.clone().as_str() {
+                let algorithm = match config.hash_algorithm.clone().as_str() {
                     "builtin" => HashAlgorithm::Builtin,
                     "sha256" => HashAlgorithm::Sha256,
                     "sha256_cbor" => HashAlgorithm::Sha256Cbor,

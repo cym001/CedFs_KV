@@ -9,7 +9,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 use async_openai::{
     config::OpenAIConfig,
     types::completions::CreateCompletionRequestArgs,
@@ -159,7 +159,7 @@ pub async fn infer(
 ) -> Result<Json<InferResponse>, (StatusCode, Json<InferResponse>)> {
     let shared = &state.shared;
     let prompt_len = payload.prompt.len();
-    info!(
+    debug!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
         payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
@@ -192,7 +192,7 @@ pub async fn infer(
     let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
         Some((s, hashes)) => {
-            info!(
+            debug!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
@@ -318,14 +318,14 @@ pub async fn performance(
 ) -> Result<Json<PerformanceResponse>, (StatusCode, Json<PerformanceResponse>)> {
     let shared = &state.shared;
     let prompt_len = payload.prompt.len();
-    info!(
+    debug!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
         payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
     let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
         Some((s, hashes)) => {
-            info!(
+            debug!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
