@@ -258,7 +258,7 @@ impl PopularityScoreOp {
         let mut heap: BinaryHeap<Reverse<(usize, [u8; 32])>> = BinaryHeap::new();
         
         // 从并发度统计器中获取所有并发度 > 1 的块
-        let concurrency_data = self.shared.concurrency_counter.get_all_concurrency();
+        let concurrency_data = self.shared.get_all_kvcache_concurrency();
         
         // 遍历所有有并发访问的 KV 块
         for (token_hash, concurrency) in concurrency_data {

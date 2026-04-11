@@ -16,9 +16,9 @@ use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
 use crate::tokenizers::TokenizerManager;
-use crate::concurrency_counter::ConcurrencyCounter;
 use crate::http::controller::inference_load_tracker::InferenceLoadTracker;
 use crate::operation::transfer_kv::TransferKvOp;
+use crate::transfer::squence::ActiveSequences;
 
 pub mod config;
 pub mod types;
@@ -30,7 +30,6 @@ pub mod network;
 pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
-pub mod concurrency_counter;
 pub mod http;
 
 #[derive(Clone)]
@@ -77,14 +76,14 @@ pub struct Shared {
     // 节点配置
     pub config: Arc<Config>,
 
-    // 并发度统计器
-    pub concurrency_counter: Arc<ConcurrencyCounter>,
-
     // 推理实例未完成请求长度总和（用于最小负载调度）
     pub inference_load_tracker: Arc<InferenceLoadTracker>,
 
     // 近期迁移记录，防止同一 token 在短时间内重复迁移
     pub recent_migrations: Arc<DashMap<[u8; 32], std::time::Instant>>,
+
+    //活跃请求序列
+    pub active_squence: Arc<ActiveSequences>,
 }
 pub struct KVServer {
     pub shared: Shared,
@@ -145,14 +144,7 @@ impl KVServer {
                     TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await
                 );
 
-                // 创建并发度统计器（5秒过期时间）
-                let concurrency_counter = Arc::new(ConcurrencyCounter::new(config.transfer_strategy));
-
-                // 启动并发度统计器的定期清理任务（每秒清理一次）
-                ConcurrencyCounter::start_cleanup_task(
-                    concurrency_counter.clone(),
-                    std::time::Duration::from_secs(1)
-                );
+                let active_squence = Arc::new(ActiveSequences::new(config.block_size));
                 
                 let shared = Shared {
                     meta_server_collect: meta_servers,
@@ -168,9 +160,9 @@ impl KVServer {
                     update_kvop_table: Arc::new(DashMap::new()),
                     ref_count: Arc::new(RefCount::new()),
                     config: Arc::new(config),
-                    concurrency_counter,
                     inference_load_tracker: Arc::new(InferenceLoadTracker::new()),
                     recent_migrations: Arc::new(DashMap::new()),
+                    active_squence,
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -443,12 +435,12 @@ impl Shared {
             .collect()
     }
 
-    /// 对指定 model 和 prompt 编码得到 token_hashes（与 SearchKvByPromptsOp::search_one_prompt_one_model 逻辑一致）
+    /// 对指定 model 和 prompt 编码得到 (token_hash, offset)（与 SearchKvByPromptsOp::search_one_prompt_one_model 逻辑一致）
     pub async fn get_token_hashes_for_prompt(
         &self,
         model: &str,
         prompt: &str,
-    ) -> Option<Vec<[u8; 32]>> {
+    ) -> Option<Vec<([u8; 32], u32)>> {
         let token_list = self
             .tokenizer_manager
             .encode_async(model, prompt)
@@ -464,7 +456,7 @@ impl Shared {
             .hasher
             .hash_tokens_with_blocks_all(&token_list, self.config.block_size)
             .iter()
-            .map(|(hash, _offset)| hash.to_u256())
+            .map(|(hash, offset)| (hash.to_u256(), *offset))
             .collect();
         Some(token_hashes)
     }
@@ -688,6 +680,34 @@ impl Shared {
     /// # 返回
     /// - `Some(vec)`: 成功，vec 为本次涉及的各块的 (token_hash, 副本数)
     /// - `None`: token_hash 为空，未做任何修改
+    pub fn report_kvcache_by_blocks(
+        &self,
+        server_id: u32,
+        token_blocks: Vec<([u8; 32], u32)>,
+    ) -> Option<Vec<([u8; 32], u32)>> {
+        if token_blocks.is_empty() {
+            return None;
+        }
+        let (token_hashes, offsets): (Vec<[u8; 32]>, Vec<u32>) = token_blocks.into_iter().unzip();
+        let replica_counts = self.create_new_kvblock(server_id, offsets, token_hashes.clone());
+        self.ref_count
+            .batch_increment_local_incremental_count(&token_hashes, 1);
+        replica_counts
+    }
+
+    pub fn report_kvcache_by_hashes(
+        &self,
+        server_id: u32,
+        token_hashes: Vec<[u8; 32]>,
+    ) -> Option<Vec<([u8; 32], u32)>> {
+        if token_hashes.is_empty() {
+            return None;
+        }
+        let token_blocks: Vec<([u8; 32], u32)> =
+            token_hashes.into_iter().map(|hash| (hash, 0)).collect();
+        self.report_kvcache_by_blocks(server_id, token_blocks)
+    }
+
     pub fn create_new_kvblock(
         &self,
         server_id: u32,
@@ -807,7 +827,7 @@ impl Shared {
     /// # 返回
     /// - 当前有效的并发度计数
     pub fn get_kvcache_concurrency(&self, token_hash: [u8; 32]) -> usize {
-        self.concurrency_counter.get_concurrency(token_hash)
+        self.active_squence.block_hold_count(&token_hash) as usize
     }
 
     /// 获取所有 KV 块的并发度统计信息
@@ -816,7 +836,7 @@ impl Shared {
     /// - (total_entries, total_concurrency, max_concurrency):
     ///   总条目数、总并发度、最大并发度
     pub fn get_concurrency_statistics(&self) -> (usize, usize, usize) {
-        self.concurrency_counter.get_statistics()
+        self.active_squence.hold_statistics()
     }
 
     /// 获取所有 token_hash 的并发度信息
@@ -824,7 +844,7 @@ impl Shared {
     /// # 返回
     /// - Vec<(token_hash, concurrency)>: 所有块的并发度信息
     pub fn get_all_kvcache_concurrency(&self) -> Vec<([u8; 32], usize)> {
-        self.concurrency_counter.get_all_concurrency()
+        self.active_squence.all_block_hold_counts()
     }
 
     pub async fn intra_domain_transfer(
@@ -909,7 +929,10 @@ impl Shared {
         let url = format!("http://{}:{}", src_server.ip, src_server.rpc_port);
         let client = TransferKvOp::new(&url);
         let position = "LocalCPUBackend".to_string();
-        let request_hash = migrate_blocks[0].0.to_vec();
+        let request_hash: Vec<u8> = migrate_blocks
+            .iter()
+            .flat_map(|(hash, _)| hash.iter().copied())
+            .collect();
         let offsets: Vec<u32> = migrate_blocks.iter().map(|(_, offset)| *offset).collect();
         tracing::info!(
             "Batch migration detail: source={}, target={}, offset_count={}",
@@ -975,7 +998,7 @@ impl Shared {
         self.insert_update_kvop(update_op);
     }
 
-    /// 增加并发度并更新副本数；若某 token 满足 concurrent_count > replica_count*2 则异步触发域内迁移。
+    /// 基于活跃请求持有计数判定迁移；若某 token 满足 hold_count >= replica_count*2 则异步触发域内迁移。
     /// 为避免抖动，对同一 token_hash 在短时间内的重复迁移会被抑制。
     pub fn increment_concurrency_and_maybe_migrate(
         &self,
@@ -988,9 +1011,14 @@ impl Shared {
         let mut prefix_break_index: Option<usize> = None;
         let mut prefix_break_hash: Option<[u8; 32]> = None;
 
+        let token_hashes: Vec<[u8; 32]> = items.iter().map(|(token_hash, _)| *token_hash).collect();
+        let hold_counts = self.active_squence.sequence_hold_counts(&token_hashes);
+
         // 前缀短路：遇到第一个不满足迁移条件的块后，后续块不再迁移
         for (idx, &(token_hash, replica_count)) in items.iter().enumerate() {
-            let should_migrate = self.concurrency_counter.increment(token_hash, replica_count);
+            let hold_count = hold_counts.get(idx).copied().unwrap_or(0) as usize;
+            let should_migrate = replica_count > 0
+                && hold_count >= (replica_count as usize).saturating_mul(2);
             if !should_migrate {
                 prefix_break_index = Some(idx);
                 prefix_break_hash = Some(token_hash);
@@ -1011,11 +1039,11 @@ impl Shared {
             }
 
             if should_enqueue {
-                let hex = Shared::token_hash_to_hex(&token_hash);
-                tracing::info!(
-                    "Concurrency-triggered intra-domain migration scheduled for token_hash 0x{}",
-                    hex
-                );
+                // let hex = Shared::token_hash_to_hex(&token_hash);
+                // tracing::info!(
+                //     "Concurrency-triggered intra-domain migration scheduled for token_hash 0x{}",
+                //     hex
+                // );
                 to_migrate.push(token_hash);
             }
         }
@@ -1034,12 +1062,13 @@ impl Shared {
             );
         }
 
-        if to_migrate.is_empty() {
+        if to_migrate.is_empty() || self.config.transfer_strategy == false{
             return;
         }
 
         let shared = self.clone();
         tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let Some((src_server, dst_server, migrate_blocks)) = shared
                 .intra_domain_transfer(&to_migrate, &request_server)
                 .await

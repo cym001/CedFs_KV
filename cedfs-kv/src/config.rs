@@ -54,6 +54,12 @@ pub struct Config {
     // 请求调度方式
     pub scheduler_strategy: String,
 
+    // score 调度策略中 KV cache 命中权重
+    pub scheduler_score_cache_weight: f64,
+
+    // score 调度策略中节点负载权重
+    pub scheduler_score_load_weight: f64,
+
     // 是否迁移KV Cache
     pub transfer_strategy: bool,
 
@@ -112,6 +118,35 @@ impl Config {
         let scheduler_strategy: String = config.get("scheduler_strategy")
             .map_err(|e| ConfigError::MissingField(format!("scheduler_strategy: {}", e)))?;
 
+        let scheduler_score_cache_weight: f64 = config
+            .get::<f64>("scheduler_score_cache_weight")
+            .unwrap_or(0.7);
+        let scheduler_score_cache_weight = if scheduler_score_cache_weight.is_finite()
+            && scheduler_score_cache_weight >= 0.0
+        {
+            scheduler_score_cache_weight
+        } else {
+            tracing::warn!(
+                "invalid scheduler_score_cache_weight={}, fallback to 0.7",
+                scheduler_score_cache_weight
+            );
+            0.7
+        };
+
+        let scheduler_score_load_weight: f64 = config
+            .get::<f64>("scheduler_score_load_weight")
+            .unwrap_or(0.3);
+        let scheduler_score_load_weight =
+            if scheduler_score_load_weight.is_finite() && scheduler_score_load_weight >= 0.0 {
+                scheduler_score_load_weight
+            } else {
+                tracing::warn!(
+                    "invalid scheduler_score_load_weight={}, fallback to 0.3",
+                    scheduler_score_load_weight
+                );
+                0.3
+            };
+
         let transfer_strategy: bool = config.get("transfer_strategy")
             .map_err(|e| ConfigError::MissingField(format!("transfer_strategy: {}", e)))?;
         
@@ -132,6 +167,8 @@ impl Config {
             .python_hash_seed(python_hash_seed)
             .model_tokenizer_map(model_tokenizer_map)
             .scheduler_strategy(scheduler_strategy)
+            .scheduler_score_cache_weight(scheduler_score_cache_weight)
+            .scheduler_score_load_weight(scheduler_score_load_weight)
             .transfer_strategy(transfer_strategy)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)

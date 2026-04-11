@@ -8,19 +8,30 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{info, warn, debug};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{warn, debug};
 use async_openai::{
     config::OpenAIConfig,
     types::completions::CreateCompletionRequestArgs,
     Client,
 };
 use futures_util::StreamExt;
-use std::time::Instant;
 
 use inference_load_tracker::InferenceLoadTracker;
 use scheduler::Scheduler;
 use crate::Shared;
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn generate_request_id(server_id: u32) -> String {
+    let sequence = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("http-{}-{}-{}", server_id, now_ns, sequence)
+}
 
 #[derive(Clone)]
 pub struct ControllerState {
@@ -48,6 +59,36 @@ struct InferenceLoadGuard {
 impl Drop for InferenceLoadGuard {
     fn drop(&mut self) {
         self.tracker.sub_load(&self.server_key, self.prompt_len);
+    }
+}
+
+/// 请求结束时自动释放活跃序列，避免计数泄漏
+struct ActiveSequenceGuard {
+    shared: Arc<Shared>,
+    request_id: Option<String>,
+}
+
+impl ActiveSequenceGuard {
+    fn new(shared: Arc<Shared>) -> Self {
+        Self {
+            shared,
+            request_id: None,
+        }
+    }
+
+    fn activate(&mut self, request_id: String, token_hashes: Vec<[u8; 32]>) {
+        self.shared
+            .active_squence
+            .add_request(request_id.clone(), Some(token_hashes));
+        self.request_id = Some(request_id);
+    }
+}
+
+impl Drop for ActiveSequenceGuard {
+    fn drop(&mut self) {
+        if let Some(request_id) = self.request_id.take() {
+            self.shared.active_squence.free(&request_id);
+        }
     }
 }
 
@@ -157,7 +198,7 @@ pub async fn infer(
     State(state): State<Arc<ControllerState>>,
     Json(payload): Json<InferRequest>,
 ) -> Result<Json<InferResponse>, (StatusCode, Json<InferResponse>)> {
-    let shared = &state.shared;
+    let shared = state.shared.clone();
     let prompt_len = payload.prompt.len();
     debug!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
@@ -189,14 +230,14 @@ pub async fn infer(
     //         ));
     //     }
     // };
-    let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, token_blocks) = match state.scheduler.select_server_by_strategy(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
-        Some((s, hashes)) => {
+        Some((s, token_blocks)) => {
             debug!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
-            (s, hashes)
+            (s, token_blocks)
         }
         None => {
             warn!(
@@ -213,6 +254,12 @@ pub async fn infer(
             ));
         }
     };
+    if !token_blocks.is_empty() {
+        if shared.report_kvcache_by_blocks(server.id, token_blocks.clone()).is_none() {
+            warn!("report_kvcache_by_blocks skipped: empty token blocks for server {}", server.id);
+        }
+    }
+    let hashes: Vec<[u8; 32]> = token_blocks.iter().map(|(hash, _)| *hash).collect();
 
     // 记录本次请求长度，返回时由 InferenceLoadGuard 自动扣减
     shared
@@ -223,6 +270,18 @@ pub async fn infer(
         server_key: server.id,
         prompt_len,
     };
+    let mut _active_sequence_guard = ActiveSequenceGuard::new(shared.clone());
+    if !hashes.is_empty() {
+        let request_id = generate_request_id(server.id);
+        _active_sequence_guard.activate(request_id, hashes.clone());
+        let replica_counts = shared.get_replica_counts(hashes.clone());
+        let items: Vec<([u8; 32], u32)> = hashes
+            .iter()
+            .zip(replica_counts.iter())
+            .map(|(&h, &r)| (h, r))
+            .collect();
+        shared.increment_concurrency_and_maybe_migrate(&items, server.clone());
+    }
 
     //todo()错误处理
     let url = server.url.clone();
@@ -290,25 +349,6 @@ pub async fn infer(
         )
     })?;
 
-    if !hashes.is_empty() {
-        let shared_for_migration = shared.clone();
-        let request_server = server.clone();
-        let token_hashes = hashes.clone();
-        tokio::spawn(async move {
-            let replica_counts = shared_for_migration.get_replica_counts(token_hashes.clone());
-            let items: Vec<([u8; 32], u32)> = token_hashes
-                .iter()
-                .zip(replica_counts.iter())
-                .map(|(&h, &r)| (h, r))
-                .collect();
-            shared_for_migration
-                .increment_concurrency_and_maybe_migrate(&items, request_server);
-            for token_hash in token_hashes {
-                shared_for_migration.concurrency_counter.decrement(token_hash);
-            }
-        });
-    }
-
     Ok(Json(result))
 }
 
@@ -316,20 +356,20 @@ pub async fn performance(
     State(state): State<Arc<ControllerState>>,
     Json(payload): Json<PerformanceRequest>,
 ) -> Result<Json<PerformanceResponse>, (StatusCode, Json<PerformanceResponse>)> {
-    let shared = &state.shared;
+    let shared = state.shared.clone();
     let prompt_len = payload.prompt.len();
     debug!(
         "infer request: model_name={}, model_path={},prompt_len={}, max_tokens={}",
         payload.model_name, payload.model_path, prompt_len, payload.max_tokens
     );
-    let (server, hashes) = match state.scheduler.select_server_by_strategy(shared, payload.model_name.as_str(), payload.prompt.as_str()).await
+    let (server, token_blocks) = match state.scheduler.select_server_by_strategy(&shared, payload.model_name.as_str(), payload.prompt.as_str()).await
     {
-        Some((s, hashes)) => {
+        Some((s, token_blocks)) => {
             debug!(
                 "infer schedule selected server_id={} url={} model={}",
                 s.id, s.url, s.model_name
             );
-            (s, hashes)
+            (s, token_blocks)
         }
         None => {
             warn!(
@@ -352,7 +392,12 @@ pub async fn performance(
             ));
         }
     };
-
+    if !token_blocks.is_empty() {
+        if shared.report_kvcache_by_blocks(server.id, token_blocks.clone()).is_none() {
+            warn!("report_kvcache_by_blocks skipped: empty token blocks for server {}", server.id);
+        }
+    }
+    let hashes: Vec<[u8; 32]> = token_blocks.iter().map(|(hash, _)| *hash).collect();
     // 记录本次请求长度，返回时由 InferenceLoadGuard 自动扣减
     shared
         .inference_load_tracker
@@ -362,6 +407,18 @@ pub async fn performance(
         server_key: server.id,
         prompt_len,
     };
+    let mut _active_sequence_guard = ActiveSequenceGuard::new(shared.clone());
+    if !hashes.is_empty() {
+        let request_id = generate_request_id(server.id);
+        _active_sequence_guard.activate(request_id, hashes.clone());
+        let replica_counts = shared.get_replica_counts(hashes.clone());
+        let items: Vec<([u8; 32], u32)> = hashes
+            .iter()
+            .zip(replica_counts.iter())
+            .map(|(&h, &r)| (h, r))
+            .collect();
+        shared.increment_concurrency_and_maybe_migrate(&items, server.clone());
+    }
 
     // 创建 async-openai client
     let config = OpenAIConfig::new()
@@ -504,25 +561,6 @@ pub async fn performance(
         .unwrap_or_else(Instant::now)
         .duration_since(start_time)
         .as_secs_f64();
-
-    if !hashes.is_empty() {
-        let shared_for_migration = shared.clone();
-        let request_server = server.clone();
-        let token_hashes = hashes.clone();
-        tokio::spawn(async move {
-            let replica_counts = shared_for_migration.get_replica_counts(token_hashes.clone());
-            let items: Vec<([u8; 32], u32)> = token_hashes
-                .iter()
-                .zip(replica_counts.iter())
-                .map(|(&h, &r)| (h, r))
-                .collect();
-            shared_for_migration
-                .increment_concurrency_and_maybe_migrate(&items, request_server);
-            for token_hash in token_hashes {
-                shared_for_migration.concurrency_counter.decrement(token_hash);
-            }
-        });
-    }
 
     Ok(Json(PerformanceResponse {
         success: true,
