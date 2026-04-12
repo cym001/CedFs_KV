@@ -36,15 +36,21 @@ pub const PENDING_MIGRATION_TTL_SECS: u64 = 60;
 pub struct PendingMigrationTask {
     pub source_server_id: u32,
     pub eligible_blocks: Vec<([u8; 32], u64)>,
+    pub token_ids: Vec<u32>,
     pub created_at: Instant,
     pub ttl: Duration,
 }
 
 impl PendingMigrationTask {
-    pub fn new(source_server_id: u32, eligible_blocks: Vec<([u8; 32], u64)>) -> Self {
+    pub fn new(
+        source_server_id: u32,
+        eligible_blocks: Vec<([u8; 32], u64)>,
+        token_ids: Vec<u32>,
+    ) -> Self {
         Self {
             source_server_id,
             eligible_blocks,
+            token_ids,
             created_at: Instant::now(),
             ttl: Duration::from_secs(PENDING_MIGRATION_TTL_SECS),
         }
@@ -911,6 +917,7 @@ impl Shared {
                 token_hash.to_vec(),
                 position,
                 vec![offset],
+                vec![],
                 dst_server.ip.to_string(),
                 dst_server.init_port as i32,
                 true,
@@ -944,6 +951,7 @@ impl Shared {
         &self,
         source_server: &DataServer,
         hash_seq_with_concurrency: &[([u8; 32], u64)],
+        token_ids: &[u32],
     ) -> anyhow::Result<HashSeqMigrationResult> {
         let mut result = HashSeqMigrationResult {
             total_hash_count: hash_seq_with_concurrency.len(),
@@ -1083,6 +1091,7 @@ impl Shared {
                 concatenated_hash_bytes,
                 position,
                 all_request_offsets,
+                token_ids.to_vec(),
                 target_server.ip.to_string(),
                 target_server.init_port as i32,
                 true,

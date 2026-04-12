@@ -52,21 +52,46 @@ impl RequestEndOp {
                 pending_task.source_server_id,
                 self.request_id
             );
-            tracing::info!("RequestEndOp: removed request {}", self.request_id);
+            tracing::debug!("RequestEndOp: removed request {}", self.request_id);
             return Ok(());
         };
 
-        let migration_result = self
-            .shared
-            .migrate_hash_seq_with_rr_target(&source_server, &pending_task.eligible_blocks)
-            .await?;
-        tracing::info!(
-            "RequestEndOp: request_id={} migration result: {:?}",
-            self.request_id,
-            migration_result
-        );
+        if !self.shared.config.transfer_strategy {
+            tracing::debug!(
+                "RequestEndOp: request_id={} skip migration because transfer_strategy=false",
+                self.request_id
+            );
+            return Ok(());
+        }
 
-        tracing::debug!("RequestEndOp: removed request {}", self.request_id);
+        let shared = self.shared.clone();
+        let request_id = self.request_id.clone();
+        let eligible_blocks = pending_task.eligible_blocks;
+        let token_ids = pending_task.token_ids;
+        let source_server = source_server.clone();
+
+        tokio::spawn(async move {
+            match shared
+                .migrate_hash_seq_with_rr_target(&source_server, &eligible_blocks, &token_ids)
+                .await
+            {
+                Ok(migration_result) => {
+                    tracing::info!(
+                        "RequestEndOp: request_id={} migration result: {:?}",
+                        request_id,
+                        migration_result
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "RequestEndOp: request_id={} async migration failed: {:?}",
+                        request_id,
+                        e
+                    );
+                }
+            }
+        });
+
         Ok(())
     }
 }

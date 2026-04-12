@@ -113,15 +113,17 @@ impl NewRequestOp {
             return Ok(());
         };
 
-        // let pending_task = PendingMigrationTask::new(source_server.id, eligible_blocks.clone());
-        // self.shared
-        //     .upsert_pending_migration_task(self.request_id.clone(), pending_task);
-        // tracing::info!(
-        //     "NewRequestOp: request_id={} queued pending migration: source_server_id={}, blocks={}",
-        //     self.request_id,
-        //     source_server.id,
-        //     eligible_blocks.len()
-        // );
+        let pending_task =
+            PendingMigrationTask::new(source_server.id, eligible_blocks.clone(), self.tokens.clone());
+        self.shared
+            .upsert_pending_migration_task(self.request_id.clone(), pending_task);
+        tracing::info!(
+            "NewRequestOp: request_id={} queued pending migration: source_server_id={}, blocks={}, token_ids={}",
+            self.request_id,
+            source_server.id,
+            eligible_blocks.len(),
+            self.tokens.len()
+        );
 
         tracing::debug!("NewRequestOp: added request {}", self.request_id);
         Ok(())
