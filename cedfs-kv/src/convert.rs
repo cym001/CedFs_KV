@@ -11,6 +11,7 @@ impl From<ProtoKvBlockMeta> for KvBlockMeta {
         KvBlockMeta {
             token_hash: bytes2hash(proto.token_hash),
             offset: proto.offset,
+            pre_token: bytes2hash(proto.pre_token),
             next_tokens: vecbytes2vechash(proto.next_tokens),
             server_id: proto.server_id,
         }
@@ -23,6 +24,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
         ProtoKvBlockMeta {
             token_hash: hash2bytes(internal.token_hash),
             offset: internal.offset,
+            pre_token: hash2bytes(internal.pre_token),
             next_tokens: vechash2vecbytes(internal.next_tokens),
             server_id: internal.server_id,
         }
@@ -34,6 +36,7 @@ impl From<KvBlockMeta> for ProtoKvBlockMeta {
 impl From<ProtoMetaServer> for MetaServer {
     fn from(proto: ProtoMetaServer) -> Self {
         MetaServer {
+            id: proto.id,
             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::    Ipv4Addr::LOCALHOST)),
             port: proto.port as u16,
             layer: proto.layer,
@@ -44,6 +47,7 @@ impl From<ProtoMetaServer> for MetaServer {
 impl From<MetaServer> for ProtoMetaServer {
     fn from(internal: MetaServer) -> Self {
         ProtoMetaServer {
+            id: internal.id,
             ip: internal.ip.to_string(),
             port: internal.port as u32,
             layer: internal.layer,
@@ -59,7 +63,7 @@ impl From<cedfs_proto::kvcache::DataServer> for DataServer {
             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
             http_port: proto.http_port as u16,  
             init_port: proto.init_port as u16,
-            lookup_port: proto.lookup_port as u16,
+            rpc_port: proto.rpc_port as u16,
             model_name: proto.model_name,
             url: proto.url,
         }
@@ -72,7 +76,7 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
             ip: internal.ip.to_string(),
             http_port: internal.http_port as u32,
             init_port: internal.init_port as u32,
-            lookup_port: internal.lookup_port as u32,
+            rpc_port: internal.rpc_port as u32,
             model_name: internal.model_name,
             url: internal.url,
         }

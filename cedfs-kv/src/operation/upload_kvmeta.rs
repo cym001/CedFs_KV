@@ -10,6 +10,9 @@ pub struct UploadKvMetaOp {
 
 impl UploadKvMetaOp {
     pub async fn run(&self) -> anyhow::Result<()> {
+        // 在日志中输出 tokens
+        // tracing::info!("Uploading KVMeta, server_id: {}, tokens: {:?}", self.server_id, self.tokens);
+        
         let hash_results = self
             .shared
             .hasher
@@ -27,24 +30,26 @@ impl UploadKvMetaOp {
             .map(|(_hash, offset)| *offset)
             .collect();
 
-        self.shared.create_new_kvblock(self.server_id, offsets.clone(), tokens_hash.clone());
+        let _ = self.shared.create_new_kvblock(
+            self.server_id,
+            offsets.clone(),
+            tokens_hash.clone(),
+        );
         self.shared.ref_count.batch_increment_local_incremental_count(&tokens_hash, 1);
+
         
         // 输出哈希值和偏移量信息
-        tracing::info!(
-            "Upload KV metadata - server_id: {}, blocks: {}, offsets: {:?}, hashes: {:?}",
+        // tracing::info!(
+        //     "Upload KV metadata - server_id: {}, blocks: {}, offsets: {:?}, hashes: {:?}",
+        //     self.server_id,
+        //     hash_results.len(),
+        //     offsets,
+        //     tokens_hash.iter().map(|h| h.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>()
+        // );
+        tracing::debug!(
+            "Upload KV metadata - server_id: {}, blocks: {}",
             self.server_id,
-            hash_results.len(),
-            offsets,
-            tokens_hash.iter().map(|h| {
-                // 将32字节数组转换为256位无符号整数（大端序）
-                let mut result = num_bigint::BigUint::from(0u32);
-                for &byte in h.iter() {
-                    result = result << 8;
-                    result = result + num_bigint::BigUint::from(byte);
-                }
-                result.to_string()
-            }).collect::<Vec<_>>()
+            hash_results.len()
         );
         
         Ok(())

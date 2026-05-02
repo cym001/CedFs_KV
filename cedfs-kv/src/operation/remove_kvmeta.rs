@@ -1,9 +1,11 @@
 use anyhow::Ok;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Shared;
 use crate::types::UpdateKvOp;
 
 pub struct RemoveKvMetaOp {
+    pub server_id: u32,
     pub remove_nums: i32,
     pub tokens_hash: Vec<Vec<u8>>,
     pub shared: Shared,
@@ -40,16 +42,26 @@ impl RemoveKvMetaOp {
             // 1. 从 local_kv_index 中移除
             {
                 let mut local_index = self.shared.local_kv_index.write().await;
-                local_index.remove(token_hash);
+                let removed = local_index.remove(token_hash);
+                if removed {
+                    let counter = self
+                        .shared
+                        .local_kv_cache_block_count
+                        .entry(self.server_id)
+                        .or_insert_with(|| AtomicUsize::new(0));
+                    let _ = counter.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |v| v.checked_sub(1),
+                    );
+                }
             }
 
             // 2. 从 global_kvcache_table 中移除或更新
             if let Some(mut meta) = self.shared.global_kvcache_table.get_mut(token_hash) {
-                // 获取当前服务器 ID (假设从配置中获取)
-                let server_id = self.shared.config.local_meta_server.hash_id();
                 
                 // 从 server_id 列表中移除当前服务器
-                meta.server_id.retain(|&id| id != server_id);
+                meta.server_id.retain(|&id| id != self.server_id);
                 
                 // 如果没有服务器持有该块，则完全删除
                 if meta.server_id.is_empty() {

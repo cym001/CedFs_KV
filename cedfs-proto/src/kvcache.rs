@@ -10,12 +10,12 @@ pub struct DataServer {
     /// http端口
     #[prost(uint32, tag = "3")]
     pub http_port: u32,
-    /// rpc端口
+    /// nixl init端口
     #[prost(uint32, tag = "4")]
     pub init_port: u32,
     /// rpc端口
     #[prost(uint32, tag = "5")]
-    pub lookup_port: u32,
+    pub rpc_port: u32,
     /// 模型名称
     #[prost(string, tag = "6")]
     pub model_name: ::prost::alloc::string::String,
@@ -26,14 +26,17 @@ pub struct DataServer {
 /// 元数据服务器信息
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MetaServer {
+    /// 元数据管理器id
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
     /// IP地址（字符串形式）
-    #[prost(string, tag = "1")]
+    #[prost(string, tag = "2")]
     pub ip: ::prost::alloc::string::String,
     /// 端口
-    #[prost(uint32, tag = "2")]
+    #[prost(uint32, tag = "3")]
     pub port: u32,
     /// 网络层级
-    #[prost(uint32, tag = "3")]
+    #[prost(uint32, tag = "4")]
     pub layer: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -44,11 +47,14 @@ pub struct KvBlockMeta {
     /// token数量
     #[prost(uint32, tag = "2")]
     pub offset: u32,
-    /// 下一个 token 的 32 字节哈希列表
-    #[prost(bytes = "vec", repeated, tag = "3")]
+    /// 前驱块的哈希：固定长度 32 字节（根块为全零）
+    #[prost(bytes = "vec", tag = "3")]
+    pub pre_token: ::prost::alloc::vec::Vec<u8>,
+    /// 后继块的 32 字节哈希列表
+    #[prost(bytes = "vec", repeated, tag = "4")]
     pub next_tokens: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     /// 副本信息
-    #[prost(uint32, repeated, tag = "4")]
+    #[prost(uint32, repeated, tag = "5")]
     pub server_id: ::prost::alloc::vec::Vec<u32>,
 }
 /// 本地单个 block 的引用计数
@@ -105,7 +111,7 @@ pub struct SearchResult {
 pub struct UploadKvMetaRequest {
     #[prost(uint32, tag = "1")]
     pub server_id: u32,
-    #[prost(uint32, repeated, tag = "3")]
+    #[prost(uint32, repeated, tag = "2")]
     pub tokens: ::prost::alloc::vec::Vec<u32>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
@@ -127,13 +133,45 @@ pub struct RegisterInstanceResponse {
 /// 3.数据服务器向元数据服务器上传本地删除kvcache元数据
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RemoveKvMetaRequest {
-    #[prost(int32, tag = "1")]
+    #[prost(uint32, tag = "1")]
+    pub id: u32,
+    #[prost(int32, tag = "2")]
     pub remove_nums: i32,
-    #[prost(bytes = "vec", repeated, tag = "2")]
+    #[prost(bytes = "vec", repeated, tag = "3")]
     pub tokens_hash: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct RemoveKvMetaResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+}
+/// 4.数据服务器向元数据服务器上传本地新增请求
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct NewRequestRequest {
+    #[prost(uint32, tag = "1")]
+    pub server_id: u32,
+    #[prost(string, tag = "2")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(uint32, repeated, tag = "3")]
+    pub tokens: ::prost::alloc::vec::Vec<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct NewRequestResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+}
+/// 5.数据服务器向元数据服务器上传本地请求结束
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestEndRequest {
+    #[prost(uint32, tag = "1")]
+    pub server_id: u32,
+    #[prost(string, tag = "2")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(uint32, repeated, tag = "3")]
+    pub tokens: ::prost::alloc::vec::Vec<u32>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct RequestEndResponse {
     #[prost(bool, tag = "1")]
     pub success: bool,
 }
@@ -155,7 +193,7 @@ pub struct GetKvMetaResponse {
     /// 目标节点已知的元数据服务器信息
     #[prost(message, repeated, tag = "2")]
     pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点已知的数据服务器信息
+    /// 目标节点的数据服务器信息
     #[prost(message, repeated, tag = "3")]
     pub data_server: ::prost::alloc::vec::Vec<DataServer>,
     /// 本地所有 block 的全量计数
@@ -183,7 +221,7 @@ pub struct UpdateKvMetaResponse {
     /// 目标节点已知的元数据服务器信息
     #[prost(message, repeated, tag = "1")]
     pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点已知的数据服务器信息
+    /// 目标节点的数据服务器信息
     #[prost(message, repeated, tag = "2")]
     pub data_server: ::prost::alloc::vec::Vec<DataServer>,
 }
@@ -372,6 +410,54 @@ pub mod kv_meta2_data_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("kvcache.KvMeta2Data", "RemoveKvMeta"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn new_request(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NewRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::NewRequestResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/kvcache.KvMeta2Data/NewRequest",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("kvcache.KvMeta2Data", "NewRequest"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn request_end(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RequestEndRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestEndResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/kvcache.KvMeta2Data/RequestEnd",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("kvcache.KvMeta2Data", "RequestEnd"));
             self.inner.unary(req, path, codec).await
         }
     }
@@ -601,6 +687,20 @@ pub mod kv_meta2_data_server {
             tonic::Response<super::RemoveKvMetaResponse>,
             tonic::Status,
         >;
+        async fn new_request(
+            &self,
+            request: tonic::Request<super::NewRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::NewRequestResponse>,
+            tonic::Status,
+        >;
+        async fn request_end(
+            &self,
+            request: tonic::Request<super::RequestEndRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RequestEndResponse>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct KvMeta2DataServer<T> {
@@ -798,6 +898,96 @@ pub mod kv_meta2_data_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RemoveKvMetaSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/kvcache.KvMeta2Data/NewRequest" => {
+                    #[allow(non_camel_case_types)]
+                    struct NewRequestSvc<T: KvMeta2Data>(pub Arc<T>);
+                    impl<
+                        T: KvMeta2Data,
+                    > tonic::server::UnaryService<super::NewRequestRequest>
+                    for NewRequestSvc<T> {
+                        type Response = super::NewRequestResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NewRequestRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KvMeta2Data>::new_request(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = NewRequestSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/kvcache.KvMeta2Data/RequestEnd" => {
+                    #[allow(non_camel_case_types)]
+                    struct RequestEndSvc<T: KvMeta2Data>(pub Arc<T>);
+                    impl<
+                        T: KvMeta2Data,
+                    > tonic::server::UnaryService<super::RequestEndRequest>
+                    for RequestEndSvc<T> {
+                        type Response = super::RequestEndResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RequestEndRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as KvMeta2Data>::request_end(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RequestEndSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

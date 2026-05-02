@@ -9,7 +9,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use cedfs_kv::KVServer;
 use cedfs_kv::client::KvCacheClient;
-use cedfs_kv::transfer::transfer::KVBootstrapServer;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -49,9 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let kvserver = KVServer::new(PathBuf::from(config_path)).await?;
     let shared = kvserver.shared.clone();
     //let transfer_meta_port = shared.config.transfer_meta_port;
-    let client = KvCacheClient { shared };
-    
-    //let mut transfer_server = KVBootstrapServer::new(transfer_meta_port);
+    let client = KvCacheClient {
+        shared: shared.clone(),
+    };
 
     let (_serve_res, launch_res) = tokio::join!(
         kvserver.serve(),

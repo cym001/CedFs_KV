@@ -15,5 +15,6 @@ prost = { workspace = true }
 serde = { workspace = true }
 tonic = { workspace = true }
 
+
 [build-dependencies]
 tonic-build = { workspace = true }

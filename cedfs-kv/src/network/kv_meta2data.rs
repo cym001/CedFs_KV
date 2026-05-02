@@ -5,9 +5,16 @@ use cedfs_proto::kvcache::{
     UploadKvMetaRequest, UploadKvMetaResponse,
     RegisterInstanceRequest, RegisterInstanceResponse,
     RemoveKvMetaRequest, RemoveKvMetaResponse,
+    NewRequestRequest, NewRequestResponse,
+    RequestEndRequest, RequestEndResponse,
 };
 use crate::Shared;
-use crate::operation::{upload_kvmeta::UploadKvMetaOp,remove_kvmeta::RemoveKvMetaOp};
+use crate::operation::{
+    upload_kvmeta::UploadKvMetaOp,
+    remove_kvmeta::RemoveKvMetaOp,
+    new_request::NewRequestOp,
+    request_end::RequestEndOp,
+};
 
 
 pub struct KvCacheDataService {
@@ -22,7 +29,7 @@ impl KvMeta2Data for KvCacheDataService{
         &self,
         request: Request<UploadKvMetaRequest>,
     ) -> Result<Response<UploadKvMetaResponse>, Status> {
-        tracing::info!("upload_kv_meta request received");
+        tracing::debug!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = UploadKvMetaOp {
             server_id: req.server_id,
@@ -39,7 +46,7 @@ impl KvMeta2Data for KvCacheDataService{
     async fn register_instance(&self,
         request: Request<RegisterInstanceRequest>,
     ) -> Result<Response<RegisterInstanceResponse>, Status>{
-        tracing::info!("register_instance request received");
+        tracing::debug!("register_instance request received");
         let _req = request.into_inner();
         let _op = crate::operation::register_instance::RegisterInstanceOp{
             data_server: _req.data_server.unwrap().into(),
@@ -57,9 +64,10 @@ impl KvMeta2Data for KvCacheDataService{
         &self,
         request: Request<RemoveKvMetaRequest>,
     ) -> Result<Response<RemoveKvMetaResponse>, Status> {
-        tracing::info!("upload_kv_meta request received");
+        tracing::debug!("upload_kv_meta request received");
         let req = request.into_inner();
         let resp = RemoveKvMetaOp {
+            server_id: req.id,
             remove_nums: req.remove_nums,
             tokens_hash: req.tokens_hash,
             shared: self.shared.clone(),
@@ -69,4 +77,41 @@ impl KvMeta2Data for KvCacheDataService{
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
+
+    /// 新请求开始
+    async fn new_request(
+        &self,
+        request: Request<NewRequestRequest>,
+    ) -> Result<Response<NewRequestResponse>, Status> {
+        tracing::debug!("new_request request received");
+        let req = request.into_inner();
+        let op = NewRequestOp {
+            request_id: req.request_id,
+            server_id: req.server_id,
+            tokens: req.tokens,
+            shared: self.shared.clone(),
+        };
+        match op.run().await {
+            Ok(_) => Ok(Response::new(NewRequestResponse { success: true })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
+    /// 请求结束
+    async fn request_end(
+        &self,
+        request: Request<RequestEndRequest>,
+    ) -> Result<Response<RequestEndResponse>, Status> {
+        tracing::debug!("request_end request received");
+        let req = request.into_inner();
+        let op = RequestEndOp {
+            request_id: req.request_id,
+            shared: self.shared.clone(),
+        };
+        match op.run().await {
+            Ok(_) => Ok(Response::new(RequestEndResponse { success: true })),
+            Err(e) => Err(Status::internal(e.to_string())),
+        }
+    }
+
 }

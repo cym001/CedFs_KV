@@ -17,7 +17,10 @@ pub struct KvBlockMeta {
     // token数量
     pub offset: u32,
 
-    // token ids
+    // 前驱块的哈希值（根块为全零）
+    pub pre_token: [u8; 32],
+
+    // 后继块的哈希值列表
     pub next_tokens: Vec<[u8; 32]>,                                              
 
     // 副本信息
@@ -50,7 +53,9 @@ pub struct DataServer {
 
     /// zmq端口
     pub init_port: u16,
-    pub lookup_port: u16,
+
+    /// rpc端口
+    pub rpc_port: u16,
 
     /// 实例部署的模型名称
     pub model_name: String,
@@ -62,6 +67,9 @@ pub struct DataServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaServer {
+    /// 元数据管理器id
+    pub id: u32,
+
     /// 存储机器的ip
     pub ip: IpAddr,
 
@@ -106,7 +114,7 @@ impl Default for DataServer {
             // 默认端口0
             http_port: 0,
             init_port: 0,
-            lookup_port: 0,    
+            rpc_port: 0,    
             model_name: "default_model_name".to_string(),
             url: "default_url".to_string(),
         }
@@ -116,6 +124,7 @@ impl Default for DataServer {
 impl Default for MetaServer {
     fn default() -> Self {
         Self {
+            id: 0,
             // 默认0.0.0.0
             ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
             // 默认端口0
@@ -208,6 +217,10 @@ impl RefCount {
     pub fn batch_increment_local_incremental_count(&self, token_hashes: &[[u8; 32]], increment: u64) {
         for &token_hash in token_hashes {
             self.local_incremental_count
+                .entry(token_hash)
+                .and_modify(|c| *c += increment)
+                .or_insert(increment);
+            self.global_ref_counts
                 .entry(token_hash)
                 .and_modify(|c| *c += increment)
                 .or_insert(increment);
