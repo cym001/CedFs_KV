@@ -1,59 +1,59 @@
 use std::net::{IpAddr};
 
-use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
-use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
+// use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
+// use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
 
 use crate::types::{KvBlockMeta, MetaServer, DataServer, UpdateKvOp};
 
 // Proto -> Internal 转换
-impl From<ProtoKvBlockMeta> for KvBlockMeta {
-    fn from(proto: ProtoKvBlockMeta) -> Self {
-        KvBlockMeta {
-            token_hash: bytes2hash(proto.token_hash),
-            offset: proto.offset,
-            pre_token: bytes2hash(proto.pre_token),
-            next_tokens: vecbytes2vechash(proto.next_tokens),
-            server_id: proto.server_id,
-        }
-    }
-}
+// impl From<ProtoKvBlockMeta> for KvBlockMeta {
+//     fn from(proto: ProtoKvBlockMeta) -> Self {
+//         KvBlockMeta {
+//             token_hash: bytes2hash(proto.token_hash),
+//             offset: proto.offset,
+//             pre_token: bytes2hash(proto.pre_token),
+//             next_tokens: vecbytes2vechash(proto.next_tokens),
+//             server_id: proto.server_id,
+//         }
+//     }
+// }
 
-// Internal -> Proto 转换
-impl From<KvBlockMeta> for ProtoKvBlockMeta {
-    fn from(internal: KvBlockMeta) -> Self {
-        ProtoKvBlockMeta {
-            token_hash: hash2bytes(internal.token_hash),
-            offset: internal.offset,
-            pre_token: hash2bytes(internal.pre_token),
-            next_tokens: vechash2vecbytes(internal.next_tokens),
-            server_id: internal.server_id,
-        }
-    }
-}
+// // Internal -> Proto 转换
+// impl From<KvBlockMeta> for ProtoKvBlockMeta {
+//     fn from(internal: KvBlockMeta) -> Self {
+//         ProtoKvBlockMeta {
+//             token_hash: hash2bytes(internal.token_hash),
+//             offset: internal.offset,
+//             pre_token: hash2bytes(internal.pre_token),
+//             next_tokens: vechash2vecbytes(internal.next_tokens),
+//             server_id: internal.server_id,
+//         }
+//     }
+// }
 
 
 // MetaServer 转换
-impl From<ProtoMetaServer> for MetaServer {
-    fn from(proto: ProtoMetaServer) -> Self {
-        MetaServer {
-            id: proto.id,
-            ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::    Ipv4Addr::LOCALHOST)),
-            port: proto.port as u16,
-            layer: proto.layer,
-        }
-    }
-}
+// impl From<ProtoMetaServer> for MetaServer {
+//     fn from(proto: ProtoMetaServer) -> Self {
+//         MetaServer {
+//             id: proto.id,
+//             ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::    Ipv4Addr::LOCALHOST)),
+//             port: proto.port as u16,
+//             layer: proto.layer,
+//         }
+//     }
+// }
 
-impl From<MetaServer> for ProtoMetaServer {
-    fn from(internal: MetaServer) -> Self {
-        ProtoMetaServer {
-            id: internal.id,
-            ip: internal.ip.to_string(),
-            port: internal.port as u32,
-            layer: internal.layer,
-        }
-    }
-}
+// impl From<MetaServer> for ProtoMetaServer {
+//     fn from(internal: MetaServer) -> Self {
+//         ProtoMetaServer {
+//             id: internal.id,
+//             ip: internal.ip.to_string(),
+//             port: internal.port as u32,
+//             layer: internal.layer,
+//         }
+//     }
+// }
 
 // DataServer 转换
 impl From<cedfs_proto::kvcache::DataServer> for DataServer {
@@ -85,26 +85,26 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
 
 
 //UpdateKvOp转换
-impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
-    fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
-        UpdateKvOp {
-            token_hash: bytes2hash(proto.token_hash),
-            operation: proto.operation,
-            server_id: proto.server_id,
-        }
-    }
-}
+// impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
+//     fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
+//         UpdateKvOp {
+//             token_hash: bytes2hash(proto.token_hash),
+//             operation: proto.operation,
+//             server_id: proto.server_id,
+//         }
+//     }
+// }
 
-impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
-    fn from(internal: UpdateKvOp) -> Self {
-        cedfs_proto::kvcache::UpdateKvOp {
-            token_hash: hash2bytes(internal.token_hash),
-            operation: internal.operation,
-            server_id: internal.server_id,
-        }
-    }
+// impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
+//     fn from(internal: UpdateKvOp) -> Self {
+//         cedfs_proto::kvcache::UpdateKvOp {
+//             token_hash: hash2bytes(internal.token_hash),
+//             operation: internal.operation,
+//             server_id: internal.server_id,
+//         }
+//     }
     
-}
+// }
 
 pub fn hash2bytes(a: [u8; 32]) -> Vec<u8> {
     a.to_vec()

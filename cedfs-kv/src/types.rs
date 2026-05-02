@@ -404,39 +404,6 @@ impl RefCount {
 }
 
 
-// impl KvBlockKey {
-//     pub fn new(model_hash: i64, token_hash: i64) -> Self {
-//         Self {
-//             model_hash,
-//             token_hash,
-//         }
-//     }
-// }
-
-// impl BlockIdGenerator {
-//     pub fn new(node_id: u32) -> Self {
-//         Self {
-//             counter: AtomicU64::new(0),
-//             node_id,
-//         }
-//     }
-
-//     /// 生成新的token_hash（前32位node_id，后32位自增ID）
-//     pub fn next_id(&self) -> u64 {
-//         let local_id = self.counter.fetch_add(1, Ordering::SeqCst);
-//         ((self.node_id as u64) << 32) | (local_id & 0xFFFFFFFF)
-//     }
-
-//     /// 从token_hash提取node_id
-//     pub fn extract_node_id(token_hash: u64) -> u32 {
-//         (token_hash >> 32) as u32
-//     }
-
-//     /// 从token_hash提取本地ID
-//     pub fn extract_local_id(token_hash: u64) -> u32 {
-//         (token_hash & 0xFFFFFFFF) as u32
-//     }
-// }
 
 impl KvBlockMeta {
     /// 检查tokens是否完全匹配

@@ -23,63 +23,6 @@ pub struct DataServer {
     #[prost(string, tag = "7")]
     pub url: ::prost::alloc::string::String,
 }
-/// 元数据服务器信息
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MetaServer {
-    /// 元数据管理器id
-    #[prost(uint32, tag = "1")]
-    pub id: u32,
-    /// IP地址（字符串形式）
-    #[prost(string, tag = "2")]
-    pub ip: ::prost::alloc::string::String,
-    /// 端口
-    #[prost(uint32, tag = "3")]
-    pub port: u32,
-    /// 网络层级
-    #[prost(uint32, tag = "4")]
-    pub layer: u32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KvBlockMeta {
-    /// 块哈希：固定长度 32 字节
-    #[prost(bytes = "vec", tag = "1")]
-    pub token_hash: ::prost::alloc::vec::Vec<u8>,
-    /// token数量
-    #[prost(uint32, tag = "2")]
-    pub offset: u32,
-    /// 前驱块的哈希：固定长度 32 字节（根块为全零）
-    #[prost(bytes = "vec", tag = "3")]
-    pub pre_token: ::prost::alloc::vec::Vec<u8>,
-    /// 后继块的 32 字节哈希列表
-    #[prost(bytes = "vec", repeated, tag = "4")]
-    pub next_tokens: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
-    /// 副本信息
-    #[prost(uint32, repeated, tag = "5")]
-    pub server_id: ::prost::alloc::vec::Vec<u32>,
-}
-/// 本地单个 block 的引用计数
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct LocalBlockCount {
-    /// 块哈希：固定长度 32 字节
-    #[prost(bytes = "vec", tag = "1")]
-    pub token_hash: ::prost::alloc::vec::Vec<u8>,
-    /// 引用计数（定期同步时为增量计数，启动同步时为全量计数）
-    #[prost(uint64, tag = "2")]
-    pub count: u64,
-}
-/// 更新kvmeta的操作方式（创建、删除副本时）
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct UpdateKvOp {
-    /// 块哈希：固定长度 32 字节
-    #[prost(bytes = "vec", tag = "1")]
-    pub token_hash: ::prost::alloc::vec::Vec<u8>,
-    /// server_id的修改方式（1为增加，2为删除）
-    #[prost(uint32, tag = "2")]
-    pub operation: u32,
-    /// server_id
-    #[prost(uint32, tag = "3")]
-    pub server_id: u32,
-}
 /// 分块的token信息
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TokenLists {
@@ -174,56 +117,6 @@ pub struct RequestEndRequest {
 pub struct RequestEndResponse {
     #[prost(bool, tag = "1")]
     pub success: bool,
-}
-/// 1. GetKvMeta - 获取副本列表
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetKvMetaRequest {
-    /// 本地节点的元数据服务器信息
-    #[prost(message, optional, tag = "1")]
-    pub meta_server: ::core::option::Option<MetaServer>,
-    /// 本地节点的数据服务器信息
-    #[prost(message, repeated, tag = "2")]
-    pub data_server: ::prost::alloc::vec::Vec<DataServer>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetKvMetaResponse {
-    /// 副本信息列表
-    #[prost(message, repeated, tag = "1")]
-    pub meta: ::prost::alloc::vec::Vec<KvBlockMeta>,
-    /// 目标节点已知的元数据服务器信息
-    #[prost(message, repeated, tag = "2")]
-    pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点的数据服务器信息
-    #[prost(message, repeated, tag = "3")]
-    pub data_server: ::prost::alloc::vec::Vec<DataServer>,
-    /// 本地所有 block 的全量计数
-    #[prost(message, repeated, tag = "4")]
-    pub local_counts: ::prost::alloc::vec::Vec<LocalBlockCount>,
-}
-/// 2. UpdateKvMeta - 更新kvcache元数据
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct UpdateKvMetaRequest {
-    /// 本地新的kvcache元数据
-    #[prost(message, repeated, tag = "1")]
-    pub meta: ::prost::alloc::vec::Vec<KvBlockMeta>,
-    /// 本地所有 block 的增量计数
-    #[prost(message, repeated, tag = "2")]
-    pub local_counts: ::prost::alloc::vec::Vec<LocalBlockCount>,
-    /// 创建、删除KV Cache副本
-    #[prost(message, repeated, tag = "3")]
-    pub update_op: ::prost::alloc::vec::Vec<UpdateKvOp>,
-    /// 本地快照的时间戳
-    #[prost(uint64, tag = "4")]
-    pub update_time: u64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct UpdateKvMetaResponse {
-    /// 目标节点已知的元数据服务器信息
-    #[prost(message, repeated, tag = "1")]
-    pub meta_server: ::prost::alloc::vec::Vec<MetaServer>,
-    /// 目标节点的数据服务器信息
-    #[prost(message, repeated, tag = "2")]
-    pub data_server: ::prost::alloc::vec::Vec<DataServer>,
 }
 /// 3. SearchKvBlock - 根据token查找kvblock
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -552,54 +445,6 @@ pub mod kv_meta2_meta_client {
         pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
-        }
-        pub async fn get_kv_meta(
-            &mut self,
-            request: impl tonic::IntoRequest<super::GetKvMetaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetKvMetaResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/kvcache.KvMeta2Meta/GetKvMeta",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("kvcache.KvMeta2Meta", "GetKvMeta"));
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn update_kv_meta(
-            &mut self,
-            request: impl tonic::IntoRequest<super::UpdateKvMetaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::UpdateKvMetaResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/kvcache.KvMeta2Meta/UpdateKvMeta",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(GrpcMethod::new("kvcache.KvMeta2Meta", "UpdateKvMeta"));
-            self.inner.unary(req, path, codec).await
         }
         pub async fn search_kv_block(
             &mut self,
@@ -1056,20 +901,6 @@ pub mod kv_meta2_meta_server {
     /// Generated trait containing gRPC methods that should be implemented for use with KvMeta2MetaServer.
     #[async_trait]
     pub trait KvMeta2Meta: std::marker::Send + std::marker::Sync + 'static {
-        async fn get_kv_meta(
-            &self,
-            request: tonic::Request<super::GetKvMetaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetKvMetaResponse>,
-            tonic::Status,
-        >;
-        async fn update_kv_meta(
-            &self,
-            request: tonic::Request<super::UpdateKvMetaRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::UpdateKvMetaResponse>,
-            tonic::Status,
-        >;
         async fn search_kv_block(
             &self,
             request: tonic::Request<super::SearchKvBlockRequest>,
@@ -1161,96 +992,6 @@ pub mod kv_meta2_meta_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/kvcache.KvMeta2Meta/GetKvMeta" => {
-                    #[allow(non_camel_case_types)]
-                    struct GetKvMetaSvc<T: KvMeta2Meta>(pub Arc<T>);
-                    impl<
-                        T: KvMeta2Meta,
-                    > tonic::server::UnaryService<super::GetKvMetaRequest>
-                    for GetKvMetaSvc<T> {
-                        type Response = super::GetKvMetaResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::GetKvMetaRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KvMeta2Meta>::get_kv_meta(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = GetKvMetaSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/kvcache.KvMeta2Meta/UpdateKvMeta" => {
-                    #[allow(non_camel_case_types)]
-                    struct UpdateKvMetaSvc<T: KvMeta2Meta>(pub Arc<T>);
-                    impl<
-                        T: KvMeta2Meta,
-                    > tonic::server::UnaryService<super::UpdateKvMetaRequest>
-                    for UpdateKvMetaSvc<T> {
-                        type Response = super::UpdateKvMetaResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::UpdateKvMetaRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as KvMeta2Meta>::update_kv_meta(&inner, request).await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = UpdateKvMetaSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
                 "/kvcache.KvMeta2Meta/SearchKvBlock" => {
                     #[allow(non_camel_case_types)]
                     struct SearchKvBlockSvc<T: KvMeta2Meta>(pub Arc<T>);

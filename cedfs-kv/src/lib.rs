@@ -22,7 +22,7 @@ use crate::transfer::squnence::ActiveSequences;
 pub mod config;
 pub mod types;
 //pub mod persistence;
-pub mod client;
+//pub mod client;
 pub mod convert;
 pub mod hash;
 pub mod network;
