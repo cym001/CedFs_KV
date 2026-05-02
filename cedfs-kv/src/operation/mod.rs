@@ -1,11 +1,11 @@
 pub mod move_kvreplica;
-pub mod popularity_score;
+//pub mod popularity_score;
 //pub mod update_kvmeta;
 pub mod upload_kvmeta;
 //pub mod get_kvmeta;
-pub mod register_instance;
-pub mod search_kv;
-pub mod remove_kvmeta;
-pub mod transfer_kv;
 pub mod new_request;
+pub mod register_instance;
+pub mod remove_kvmeta;
 pub mod request_end;
+pub mod search_kv;
+pub mod transfer_kv;

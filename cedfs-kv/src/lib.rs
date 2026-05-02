@@ -1,8 +1,8 @@
 use dashmap::DashMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::info;
@@ -14,10 +14,10 @@ use crate::config::Config;
 use crate::hash::{HashAlgorithm, TokenHasher};
 use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
-use crate::types::{DataServer, KvBlockMeta, MetaServer, RefCount, UpdateKvOp};
-use crate::tokenizers::TokenizerManager;
 use crate::operation::transfer_kv::TransferKvOp;
+use crate::tokenizers::TokenizerManager;
 use crate::transfer::squnence::ActiveSequences;
+use crate::types::{BlockHashInfo, DataServer, KvBlockMeta, KvMetaIndex, MetaServer};
 
 pub mod config;
 pub mod types;
@@ -82,7 +82,7 @@ pub struct Shared {
     //pub local_kvcache_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
 
     // 分词器
-    pub tokenizer_manager:Arc<TokenizerManager>,
+    pub tokenizer_manager: Arc<TokenizerManager>,
 
     // 本地KV块索引
     pub local_kv_index: Arc<RwLock<HashSet<[u8; 32]>>>,
@@ -90,17 +90,8 @@ pub struct Shared {
     // 每个 dataserver 持有的本地 KV Cache 块数量
     pub local_kv_cache_block_count: Arc<DashMap<u32, AtomicUsize>>,
 
-    // 全局kv块元数据
-    pub global_kvcache_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
-
-    // 待更新的kvmeta
-    pub update_kvmeta_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
-
-    // 待更新的kvmeta副本操作
-    pub update_kvop_table: Arc<DashMap<[u8; 32], UpdateKvOp>>,
-
-    // 引用计数
-    pub ref_count: Arc<RefCount>,
+    // 全局 KV 元数据索引
+    pub kv_meta_index: Arc<KvMetaIndex>,
 
     // 节点配置
     pub config: Arc<Config>,
@@ -187,12 +178,11 @@ impl KVServer {
 
                 // 初始化TokenizerManager并预加载所有配置的tokenizer
                 let tokenizer_manager = Arc::new(
-                    TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await
+                    TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await,
                 );
 
                 let active_squence = Arc::new(ActiveSequences::new(config.block_size));
 
-                
                 let shared = Shared {
                     meta_server_collect: meta_servers,
                     global_data_server_collect: Arc::new(DashMap::new()),
@@ -202,10 +192,7 @@ impl KVServer {
                     tokenizer_manager,
                     local_kv_index: Arc::new(RwLock::new(HashSet::new())),
                     local_kv_cache_block_count: Arc::new(DashMap::new()),
-                    global_kvcache_table: Arc::new(DashMap::new()),
-                    update_kvmeta_table: Arc::new(DashMap::new()),
-                    update_kvop_table: Arc::new(DashMap::new()),
-                    ref_count: Arc::new(RefCount::new()),
+                    kv_meta_index: Arc::new(KvMetaIndex::new()),
                     config: Arc::new(config),
                     recent_migrations: Arc::new(DashMap::new()),
                     active_squence,
@@ -246,11 +233,7 @@ impl KVServer {
 }
 
 impl Shared {
-    pub fn upsert_pending_migration_task(
-        &self,
-        request_id: String,
-        task: PendingMigrationTask,
-    ) {
+    pub fn upsert_pending_migration_task(&self, request_id: String, task: PendingMigrationTask) {
         self.pending_migrations.insert(request_id, task);
     }
 
@@ -317,205 +300,25 @@ impl Shared {
         }
     }
 
-    /// 插入或更新远程 KV 缓存块元数据
-    ///
-    /// # 参数
-    /// - `block_meta`: 要插入或更新的块元数据
-    ///
-    /// # 返回
-    /// - `true`: 更新已存在的块
-    /// - `false`: 插入新块
-    pub fn insert_global_kvcache(&self, block_meta: KvBlockMeta) -> bool {
-        let token_hash = block_meta.token_hash;
-
-        if let Some(mut existing) = self.global_kvcache_table.get_mut(&token_hash) {
-            // 块已存在,更新元数据
-            //保留server_socket的交集，若为空则删除该块
-            let existing_servers = &existing.server_id;
-            let new_servers = &block_meta.server_id;
-            let intersection: Vec<u32> = existing_servers
-                .iter()
-                .filter(|s| new_servers.contains(s))
-                .cloned()
-                .collect();
-            if intersection.is_empty() {
-                self.global_kvcache_table.remove(&token_hash);
-                self.ref_count.remove_global_ref_count(token_hash);
-                return false;
-            }
-            let mut block_meta = block_meta.clone();
-            block_meta.server_id = intersection;
-            *existing = block_meta;
-            true
-        } else {
-            // 块不存在,插入新块
-            self.global_kvcache_table.insert(token_hash, block_meta);
-            false
-        }
-    }
-
-    /// 批量插入或更新远程 KV 缓存块
-    pub fn batch_insert_global_kvcache(&self, blocks: Vec<KvBlockMeta>) -> (usize, usize) {
-        let mut updated = 0;
-        let mut inserted = 0;
-
-        for block in blocks {
-            if self.insert_global_kvcache(block) {
-                updated += 1;
-            } else {
-                inserted += 1;
-            }
-        }
-
-        (inserted, updated)
-    }
-
-    /// 插入或更新待更新 KV 缓存块元数据
-    ///
-    /// # 参数
-    /// - `block_meta`: 要插入或更新的块元数据
-    ///
-    /// # 返回
-    /// - `true`: 更新已存在的块
-    /// - `false`: 插入新块
-    pub fn insert_update_kvcache(&self, block_meta: KvBlockMeta) -> bool {
-        let token_hash = block_meta.token_hash;
-        if let Some(mut existing) = self.update_kvmeta_table.get_mut(&token_hash) {
-            // 块已存在,更新元数据
-            *existing = block_meta;
-            true
-        } else {
-            // 块不存在,插入新块
-            self.update_kvmeta_table.insert(token_hash, block_meta);
-            false
-        }
-    }
-
-    /// 插入或更新待更新kvmeta副本操作
-    ///
-    /// # 参数
-    /// - `updatekv_op`: 要插入或更新的块元数据
-    ///
-    /// # 返回
-    /// - `true`: 更新已存在的块
-    /// - `false`: 插入新块
-
-    pub fn insert_update_kvop(&self, updatekv_op: UpdateKvOp) -> bool {
-        let token_hash = updatekv_op.token_hash;
-        if let Some(mut existing) = self.update_kvop_table.get_mut(&token_hash) {
-            // 块已存在,更新元数据
-            *existing = updatekv_op;
-            true
-        } else {
-            // 块不存在,插入新块
-            self.update_kvop_table.insert(token_hash, updatekv_op);
-            false
-        }
-    }
-
-    pub async fn execute_update_kvop(&self, op: UpdateKvOp) -> anyhow::Result<()> {
-        let hash = op.token_hash;
-        let server = op.server_id;
-
-        match op.operation {
-            // 添加副本
-            1 => {
-                {
-                    let mut local = self.local_kv_index.write().await;
-                    let inserted = local.insert(hash);
-                    if inserted {
-                        self.local_kv_cache_block_count
-                            .entry(server)
-                            .or_insert_with(|| AtomicUsize::new(0))
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-
-                if let Some(mut meta) = self.get_global_kvcache(hash) {
-                    if !meta.server_id.contains(&server) {
-                        meta.server_id.push(server);
-                    }
-                    self.insert_global_kvcache(meta);
-                }
-
-                tracing::info!(
-                    "Executed add replica operation for token_hash {:?} on server_id {}.",
-                    hash,
-                    server
-                );
-            },
-
-            // 删除副本
-            2 => {
-                {
-                    let mut local = self.local_kv_index.write().await;
-                    let removed = local.remove(&hash);
-                    if removed {
-                        let counter = self
-                            .local_kv_cache_block_count
-                            .entry(server)
-                            .or_insert_with(|| AtomicUsize::new(0));
-                        let _ = counter.fetch_update(
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                            |v| v.checked_sub(1),
-                        );
-                    }
-                }
-
-                if let Some(mut meta) = self.get_global_kvcache(hash) {
-                    meta.server_id.retain(|&id| id != server);
-
-                    if meta.server_id.is_empty() {
-                        self.remove_global_kvcache(hash);
-                    } else {
-                        self.insert_global_kvcache(meta);
-                    }
-                }
-
-                tracing::info!(
-                    "Executed delete replica operation for token_hash {:?} on server_id {}.",
-                    hash,
-                    server
-                );
-            },
-
-            // 未知操作
-            _ => {
-                tracing::error!("Unknown operation type: {}", op.operation);
-            },
-        }
-
-        Ok(())
-    }
-}
-
-// 辅助函数
-impl Shared {
-    /// 从远程表删除块
+    /// 从全局 KV 元数据索引删除块。
     pub fn remove_global_kvcache(&self, token_hash: [u8; 32]) -> Option<KvBlockMeta> {
-        self.global_kvcache_table
-            .remove(&token_hash)
-            .map(|(_, v)| v)
+        self.kv_meta_index
+            .remove_block(token_hash)
+            .map(|snapshot| snapshot.meta)
     }
 
-    /// 获取远程块元数据
+    /// 获取全局块元数据快照。
     pub fn get_global_kvcache(&self, token_hash: [u8; 32]) -> Option<KvBlockMeta> {
-        self.global_kvcache_table
-            .get(&token_hash)
-            .map(|v| v.clone())
+        self.kv_meta_index
+            .get_block(token_hash)
+            .map(|snapshot| snapshot.meta)
     }
 
-    /// 根据 token_hash 列表返回各块在 global_kvcache_table 中的副本数（server_id.len()），不存在则为 0
+    /// 根据 token_hash 列表返回各块副本数，不存在则为 0。
     pub fn get_replica_counts(&self, token_hashes: Vec<[u8; 32]>) -> Vec<u32> {
         token_hashes
             .iter()
-            .map(|h| {
-                self.global_kvcache_table
-                    .get(h)
-                    .map(|meta| meta.server_id.len() as u32)
-                    .unwrap_or(0)
-            })
+            .map(|h| self.kv_meta_index.replica_count(*h))
             .collect()
     }
 
@@ -545,36 +348,36 @@ impl Shared {
         Some(token_hashes)
     }
 
+    fn block_infos_from_seq_hashes(&self, token_hashes: &[[u8; 32]]) -> Vec<BlockHashInfo> {
+        let mut blocks = Vec::with_capacity(token_hashes.len());
+        for seq_hash in token_hashes {
+            let Some(snapshot) = self.kv_meta_index.get_block(*seq_hash) else {
+                break;
+            };
+            blocks.push(BlockHashInfo {
+                position: snapshot.meta.position,
+                local_hash: snapshot.meta.local_hash,
+                seq_hash: snapshot.meta.seq_hash,
+                offset: snapshot.meta.offset,
+            });
+        }
+        blocks
+    }
+
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
-    /// 
+    ///
     /// # 参数
     /// - `token_hash`: 块的哈希值
     /// - `server_id`: 要移除的服务器ID
     pub fn remove_server_from_kv_meta(&self, token_hash: [u8; 32], server_id: u32) {
-        // 更新 global_kvcache_table，移除对应的 server_id
-        let should_remove_block = if let Some(mut meta) = self.global_kvcache_table.get_mut(&token_hash) {
-            meta.server_id.retain(|&id| id != server_id);
-            meta.server_id.is_empty()
-        } else {
-            false
-        };
-
-        // 如果该块没有任何副本了，从 global_kvcache_table 中移除
-        if should_remove_block {
-            self.global_kvcache_table.remove(&token_hash);
+        let before = self.kv_meta_index.replica_count(token_hash);
+        let removed = self.kv_meta_index.remove_server(token_hash, server_id);
+        if removed && before <= 1 {
             tracing::info!(
-                "Removed KV block {:?} from global_kvcache_table as it has no replicas",
+                "Removed KV block {:?} from kv_meta_index as it has no replicas",
                 token_hash
             );
         }
-
-        // 生成更新操作，用于同步给其他元数据服务器
-        let update_op = UpdateKvOp {
-            token_hash,
-            operation: 2, // 删除副本操作
-            server_id,
-        };
-        self.insert_update_kvop(update_op);
 
         tracing::debug!(
             "Removed server_id {} from KV metadata for token_hash {:?}",
@@ -646,258 +449,73 @@ impl Shared {
     //     token_hash
     // }
 
-    /// 从global_kvcache_table中查找token_hash序列的最大前缀匹配
-    ///
-    /// # 参数
-    /// - `token_hash`: 待匹配的token_hash序列
-    ///
-    /// # 返回
-    /// - Vec<(server_id, matched_token_count)>: 每个server_id匹配的token数量（offset之和）
+    /// 查找 token_hash 序列的最大前缀匹配。
     pub fn search_tokens(&self, token_hash: Vec<[u8; 32]>) -> Vec<(u32, u32)> {
-        if token_hash.is_empty() {
-            return Vec::new();
-        }
-
-        // 记录每个server_id的匹配token总数（offset之和）
-        let mut server_matched_token_counts: HashMap<u32, u32> = HashMap::new();
-        let mut current_hash = token_hash[0];
-
-        // 从第一个token开始匹配
-        for i in 0..token_hash.len() {
-            // 查找当前hash对应的KvBlockMeta
-            if let Some(meta) = self.global_kvcache_table.get(&current_hash) {
-                // 更新每个server的匹配token数量（累加offset）
-                for &server_id in &meta.server_id {
-                    server_matched_token_counts
-                        .entry(server_id)
-                        .and_modify(|count| *count += meta.offset)
-                        .or_insert(meta.offset);
-                }
-
-                // 如果还有下一个token需要匹配
-                if i + 1 < token_hash.len() {
-                    let next_hash = token_hash[i + 1];
-
-                    // 检查next_tokens中是否包含下一个hash
-                    if meta.next_tokens.contains(&next_hash) {
-                        // 继续匹配下一个token
-                        current_hash = next_hash;
-                    } else {
-                        // next_tokens中不包含下一个hash，停止匹配
-                        break;
-                    }
-                } else {
-                    // 已经是最后一个token了
-                    break;
-                }
-            } else {
-                // 当前hash不存在于global_kvcache_table中，停止匹配
-                break;
-            }
-        }
-
-        // 转换为Vec返回
-        server_matched_token_counts.into_iter().collect()
+        let blocks = self.block_infos_from_seq_hashes(&token_hash);
+        self.kv_meta_index.find_matches(&blocks)
     }
 
-    /// 查找指定server_id的匹配token数量
-    /// 
-    /// # 参数
-    /// - `server_id`: 服务器ID
-    /// - `token_hash`: 待匹配的token_hash序列
-    /// 
-    /// # 返回
-    /// - 指定server_id匹配的token_hash数量
+    pub fn search_tokens_by_infos(&self, blocks: &[BlockHashInfo]) -> Vec<(u32, u32)> {
+        self.kv_meta_index.find_matches(blocks)
+    }
+
+    /// 查找指定 server_id 的匹配块数量。
     pub fn search_tokens_with_server(&self, server_id: u32, token_hash: Vec<[u8; 32]>) -> u32 {
-        if token_hash.is_empty() {
-            return 0;
-        }
-
-        let mut matched_token_count: u32 = 0;
-        let mut current_hash = token_hash[0];
-
-        // 从第一个token开始匹配
-        for i in 0..token_hash.len() {
-            // 查找当前hash对应的KvBlockMeta
-            if let Some(meta) = self.global_kvcache_table.get(&current_hash) {
-                // 检查该块是否包含指定的server_id
-                if meta.server_id.contains(&server_id) {
-                    // 找到匹配，累加1
-                    matched_token_count += 1;
-                    
-                    // 如果还有下一个token需要匹配
-                    if i + 1 < token_hash.len() {
-                        let next_hash = token_hash[i + 1];
-                        
-                        // 检查next_tokens中是否包含下一个hash
-                        if meta.next_tokens.contains(&next_hash) {
-                            // 继续匹配下一个token
-                            current_hash = next_hash;
-                        } else {
-                            // next_tokens中不包含下一个hash，停止匹配
-                            break;
-                        }
-                    } else {
-                        // 已经是最后一个token了
-                        break;
-                    }
-                } else {
-                    // 当前块不包含指定的server_id，停止匹配
-                    break;
-                }
-            } else {
-                // 当前hash不存在于global_kvcache_table中，停止匹配
-                break;
-            }
-        }
-
-        matched_token_count
+        let blocks = self.block_infos_from_seq_hashes(&token_hash);
+        self.kv_meta_index.match_len_for_server(server_id, &blocks) as u32
     }
 
-    
-    /// 创建新的KV块
-    /// 
-    /// # 参数
-    /// - `server_id`: 服务器ID
-    /// - `token_hash`: token_hash序列
-    /// 
-    /// # 返回
-    /// - `Some(vec)`: 成功，vec 为本次涉及的各块的 (token_hash, 副本数)
-    /// - `None`: token_hash 为空，未做任何修改
+    pub fn search_block_infos_with_server(&self, server_id: u32, blocks: &[BlockHashInfo]) -> u32 {
+        self.kv_meta_index.match_len_for_server(server_id, blocks) as u32
+    }
+
+    /// 创建新的 KV 块。
     pub fn create_new_kvblock(
         &self,
         server_id: u32,
-        offset: Vec<u32>,
-        token_hash: Vec<[u8; 32]>,
+        blocks: Vec<BlockHashInfo>,
     ) -> Option<Vec<([u8; 32], u32)>> {
-        if token_hash.is_empty() {
+        if blocks.is_empty() {
             return None;
         }
 
-        // 1. 查找当前server_id的最大前缀匹配长度
-        let matched_length = self.search_tokens_with_server(server_id, token_hash.clone()) as usize;
-        let mut replica_counts = Vec::with_capacity(token_hash.len() - matched_length);
+        let store_results = self.kv_meta_index.store_blocks(server_id, &blocks);
+        let mut replica_counts = Vec::with_capacity(store_results.len());
 
-        // 2. 处理未匹配的token块
-        for i in matched_length..token_hash.len() {
-            let current_hash = token_hash[i];
-
-            // 确定pre_token: 如果不是第一个token，则为前一个token的hash，否则为全零（表示根块）
-            let pre_token = if i > 0 {
-                token_hash[i - 1]
-            } else {
-                [0u8; 32]
-            };
-
-            // 确定next_tokens: 如果不是最后一个token，则包含下一个token的hash
-            let next_tokens = if i + 1 < token_hash.len() {
-                vec![token_hash[i + 1]]
-            } else {
-                Vec::new()
-            };
-
-            // 检查全局是否存在相同hash的块
-            if let Some(mut existing_meta) = self.global_kvcache_table.get_mut(&current_hash) {
-                // 存在相同hash的块，检查server_id
-                if !existing_meta.server_id.contains(&server_id) {
-                    // server_id不同，需要更新
-                    existing_meta.server_id.push(server_id);
-                    self.local_kv_cache_block_count
-                        .entry(server_id)
-                        .or_insert_with(|| AtomicUsize::new(0))
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    // 合并next_tokens（去重）
-                    for &next_token in &next_tokens {
-                        if !existing_meta.next_tokens.contains(&next_token) {
-                            existing_meta.next_tokens.push(next_token);
-                        }
-                    }
-
-                    // 生成UpdateKvOp
-                    let update_op = UpdateKvOp {
-                        token_hash: current_hash,
-                        operation: 1, // 添加副本操作
-                        server_id,
-                    };
-                    self.insert_update_kvop(update_op);
-
-                    let replica_count = existing_meta.server_id.len() as u32;
-                    replica_counts.push((current_hash, replica_count));
-
-                    tracing::debug!(
-                        "Updated existing KvBlockMeta for token_hash {:?}, added server_id {}, replica_count {}",
-                        current_hash,
-                        server_id,
-                        replica_count
-                    );
-                } else {
-                    // server_id已存在，只需要更新next_tokens
-                    for &next_token in &next_tokens {
-                        if !existing_meta.next_tokens.contains(&next_token) {
-                            existing_meta.next_tokens.push(next_token);
-                        }
-                    }
-                    let replica_count = existing_meta.server_id.len() as u32;
-                    replica_counts.push((current_hash, replica_count));
-                }
-            } else {
-                // 不存在相同hash的块，创建新的KvBlockMeta
-                let new_meta = KvBlockMeta {
-                    token_hash: current_hash,
-                    offset: offset[i],
-                    pre_token,
-                    next_tokens: next_tokens.clone(),
-                    server_id: vec![server_id],
-                };
-
+        for result in store_results {
+            if result.server_added {
                 self.local_kv_cache_block_count
                     .entry(server_id)
                     .or_insert_with(|| AtomicUsize::new(0))
                     .fetch_add(1, Ordering::Relaxed);
-
-                // 插入到global_kvcache_table
-                self.insert_global_kvcache(new_meta.clone());
-
-                // 插入到update_kvmeta_table
-                self.insert_update_kvcache(new_meta);
-
-                replica_counts.push((current_hash, 1));
-
-                tracing::debug!(
-                    "Created new KvBlockMeta for token_hash {:?}, server_id {}, replica_count 1",
-                    current_hash,
-                    server_id
-                );
             }
+            replica_counts.push((result.seq_hash, result.replica_count));
         }
 
         Some(replica_counts)
     }
 
-
     pub async fn intra_domain_transfer(
         &self,
         token_hash: &[u8; 32],
     ) -> Option<([u8; 32], u32, DataServer, DataServer)> {
-        let global_kvcache_table = &self.global_kvcache_table;
         let local_data_servers = self.local_data_server_collect.read().await;
 
-        let kv_meta = global_kvcache_table.get(token_hash)?;
-        let offset = kv_meta.offset;
+        let snapshot = self.kv_meta_index.get_block(*token_hash)?;
+        let offset = snapshot.meta.offset;
 
         let source = local_data_servers
             .iter()
-            .find(|ds| kv_meta.server_id.contains(&ds.id))?;
+            .find(|ds| snapshot.servers.contains(&ds.id))?;
         let target = local_data_servers
             .iter()
-            .find(|ds| !kv_meta.server_id.contains(&ds.id))?;
+            .find(|ds| !snapshot.servers.contains(&ds.id))?;
 
         let hex = Shared::token_hash_to_hex(token_hash);
         tracing::info!(
             "Intra-domain transfer: token_hash 0x{}, replicas: {}, source: {}, target: {}",
             hex,
-            kv_meta.server_id.len(),
+            snapshot.servers.len(),
             source.id,
             target.id
         );
@@ -985,12 +603,12 @@ impl Shared {
         // 2) 先解析可迁移元数据（hash -> offset + replica_count + concurrency）
         let mut known_hash_with_state: Vec<([u8; 32], u32, u64, u64)> = Vec::new();
         for (token_hash, concurrency) in hash_seq_with_concurrency {
-            if let Some(meta) = self.global_kvcache_table.get(token_hash) {
+            if let Some(snapshot) = self.kv_meta_index.get_block(*token_hash) {
                 known_hash_with_state.push((
                     *token_hash,
-                    meta.offset,
+                    snapshot.meta.offset,
                     *concurrency,
-                    meta.server_id.len() as u64,
+                    snapshot.servers.len() as u64,
                 ));
             } else {
                 result.missing_meta_count += 1;
@@ -1004,7 +622,7 @@ impl Shared {
 
         // 3) 顺序门控：第一个 concurrency < replica_count*2 之后全部截断
         let mut gated_hashes: Vec<([u8; 32], u32, u64)> = Vec::new();
-        for (token_hash, offset, concurrency, replica_count) in known_hash_with_state {
+        for (token_hash, offset, concurrency, _replica_count) in known_hash_with_state {
             // if concurrency < replica_count.saturating_mul(2) {
             //     break;
             // }
@@ -1031,11 +649,7 @@ impl Shared {
             let target = &candidate_targets[idx];
             let mut first_miss_at: Option<usize> = None;
             for (i, (token_hash, _, _)) in gated_hashes.iter().enumerate() {
-                let exists_on_target = self
-                    .global_kvcache_table
-                    .get(token_hash)
-                    .map(|meta| meta.server_id.contains(&target.id))
-                    .unwrap_or(false);
+                let exists_on_target = self.kv_meta_index.contains_server(*token_hash, target.id);
                 if !exists_on_target {
                     first_miss_at = Some(i);
                     break;
@@ -1080,10 +694,8 @@ impl Shared {
         for token_hash in &all_request_hashes {
             concatenated_hash_bytes.extend_from_slice(token_hash);
         }
-        let all_request_offsets: Vec<u32> = gated_hashes
-            .iter()
-            .map(|(_, offset, _)| *offset)
-            .collect();
+        let all_request_offsets: Vec<u32> =
+            gated_hashes.iter().map(|(_, offset, _)| *offset).collect();
         result.to_migrate_count = all_request_hashes.len();
 
         match client
@@ -1115,7 +727,7 @@ impl Shared {
                 } else {
                     result.fail_count += all_request_hashes.len();
                 }
-            }
+            },
             Err(e) => {
                 result.fail_count += all_request_hashes.len();
                 tracing::warn!(
@@ -1125,7 +737,7 @@ impl Shared {
                     all_request_hashes.len(),
                     e
                 );
-            }
+            },
         }
 
         Ok(result)
@@ -1133,26 +745,12 @@ impl Shared {
 
     /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
     async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
-        if let Some(mut meta) = self.global_kvcache_table.get_mut(&token_hash) {
-            if !meta.server_id.contains(&new_server_id) {
-                meta.server_id.push(new_server_id);
-            }
-        }
+        self.kv_meta_index.add_server(token_hash, new_server_id);
         let _ = self.insert_local_kvcache(token_hash, new_server_id).await;
-        self.ref_count.increment_local_ref_count(token_hash, 1);
-        let update_op = UpdateKvOp {
-            token_hash,
-            operation: 1,
-            server_id: new_server_id,
-        };
-        self.insert_update_kvop(update_op);
     }
 
     /// 若 concurrent_count > replica_count*2 时，可调用此方法：对单个 token_hash 尝试域内迁移并执行
-    pub async fn try_trigger_intra_domain_migration_for_token(
-        &self,
-        token_hash: [u8; 32],
-    ) {
+    pub async fn try_trigger_intra_domain_migration_for_token(&self, token_hash: [u8; 32]) {
         if let Some(transfer_item) = self.intra_domain_transfer(&token_hash).await {
             if let Err(e) = self.execute_single_kv_migration(transfer_item).await {
                 let hex = Shared::token_hash_to_hex(&token_hash);
@@ -1164,8 +762,4 @@ impl Shared {
             }
         }
     }
-
-
 }
-
-

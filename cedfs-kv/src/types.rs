@@ -1,120 +1,489 @@
 use dashmap::DashMap;
-use std::sync::Arc;
-use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use tokio::time;
-use serde::{Serialize, Deserialize};
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::RwLock;
 
-/// 元数据
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct KvBlockMeta {
-             
-    // 块哈希值
-    pub token_hash: [u8; 32],        
+pub type BlockHash = [u8; 32];
+pub type ServerId = u32;
 
-    // token数量
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlockHashInfo {
+    pub position: usize,
+    pub local_hash: BlockHash,
+    pub seq_hash: BlockHash,
     pub offset: u32,
-
-    // 前驱块的哈希值（根块为全零）
-    pub pre_token: [u8; 32],
-
-    // 后继块的哈希值列表
-    pub next_tokens: Vec<[u8; 32]>,                                              
-
-    // 副本信息
-    pub server_id: Vec<u32>,      
-
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct KvBlockMeta {
+    pub seq_hash: BlockHash,
+    pub local_hash: BlockHash,
+    pub position: usize,
+    pub offset: u32,
+}
 
-/// 引用计数
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockLocation {
+    pub position: usize,
+    pub local_hash: BlockHash,
+}
+
+#[derive(Debug, Clone)]
+pub struct KvBlockState {
+    pub meta: KvBlockMeta,
+    pub servers: HashSet<ServerId>,
+    pub ref_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct KvBlockSnapshot {
+    pub meta: KvBlockMeta,
+    pub servers: Vec<ServerId>,
+    pub ref_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreBlockResult {
+    pub seq_hash: BlockHash,
+    pub replica_count: u32,
+    pub server_added: bool,
+}
+
+#[derive(Debug, Clone)]
+enum SeqEntry {
+    Single(BlockHash, KvBlockState),
+    Multi(HashMap<BlockHash, KvBlockState>),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RemoveState {
+    seq_removed: bool,
+    entry_empty: bool,
+}
+
+impl SeqEntry {
+    fn new(info: BlockHashInfo, server_id: ServerId) -> Self {
+        let mut servers = HashSet::new();
+        servers.insert(server_id);
+        Self::Single(
+            info.seq_hash,
+            KvBlockState {
+                meta: KvBlockMeta::from(info),
+                servers,
+                ref_count: 0,
+            },
+        )
+    }
+
+    fn insert(&mut self, info: BlockHashInfo, server_id: ServerId) -> StoreBlockResult {
+        match self {
+            Self::Single(existing_hash, state) if *existing_hash == info.seq_hash => {
+                let server_added = state.servers.insert(server_id);
+                StoreBlockResult {
+                    seq_hash: info.seq_hash,
+                    replica_count: state.servers.len() as u32,
+                    server_added,
+                }
+            },
+            Self::Single(existing_hash, existing_state) => {
+                let mut map = HashMap::with_capacity(2);
+                map.insert(*existing_hash, existing_state.clone());
+                let mut servers = HashSet::new();
+                servers.insert(server_id);
+                map.insert(
+                    info.seq_hash,
+                    KvBlockState {
+                        meta: KvBlockMeta::from(info),
+                        servers,
+                        ref_count: 0,
+                    },
+                );
+                *self = Self::Multi(map);
+                StoreBlockResult {
+                    seq_hash: info.seq_hash,
+                    replica_count: 1,
+                    server_added: true,
+                }
+            },
+            Self::Multi(map) => {
+                let state = map.entry(info.seq_hash).or_insert_with(|| {
+                    let mut servers = HashSet::new();
+                    servers.insert(server_id);
+                    KvBlockState {
+                        meta: KvBlockMeta::from(info),
+                        servers,
+                        ref_count: 0,
+                    }
+                });
+                let server_added = state.servers.insert(server_id);
+                StoreBlockResult {
+                    seq_hash: info.seq_hash,
+                    replica_count: state.servers.len() as u32,
+                    server_added,
+                }
+            },
+        }
+    }
+
+    fn get(&self, seq_hash: BlockHash) -> Option<&KvBlockState> {
+        match self {
+            Self::Single(existing_hash, state) if *existing_hash == seq_hash => Some(state),
+            Self::Single(_, _) => None,
+            Self::Multi(map) => map.get(&seq_hash),
+        }
+    }
+
+    fn get_mut(&mut self, seq_hash: BlockHash) -> Option<&mut KvBlockState> {
+        match self {
+            Self::Single(existing_hash, state) if *existing_hash == seq_hash => Some(state),
+            Self::Single(_, _) => None,
+            Self::Multi(map) => map.get_mut(&seq_hash),
+        }
+    }
+
+    fn remove_server(&mut self, seq_hash: BlockHash, server_id: ServerId) -> RemoveState {
+        match self {
+            Self::Single(existing_hash, state) if *existing_hash == seq_hash => {
+                state.servers.remove(&server_id);
+                let empty = state.servers.is_empty();
+                RemoveState {
+                    seq_removed: empty,
+                    entry_empty: empty,
+                }
+            },
+            Self::Single(_, _) => RemoveState::default(),
+            Self::Multi(map) => {
+                let mut seq_removed = false;
+                if let Some(state) = map.get_mut(&seq_hash) {
+                    state.servers.remove(&server_id);
+                    seq_removed = state.servers.is_empty();
+                }
+                if seq_removed {
+                    map.remove(&seq_hash);
+                }
+                RemoveState {
+                    seq_removed,
+                    entry_empty: map.is_empty(),
+                }
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct RefCount {
-    /// 本地增量计数 key: token_hash, value: incremental_count
-    pub local_incremental_count: DashMap<[u8; 32], u64>,
-    /// 本地完整引用计数 key: token_hash, value: full_count
-    pub local_ref_counts: DashMap<[u8; 32], u64>,
-    /// 全局引用计数 key: token_hash, value: count
-    pub global_ref_counts: DashMap<[u8; 32], u64>,
+pub struct KvMetaIndex {
+    index: DashMap<(usize, BlockHash), SeqEntry>,
+    server_blocks: DashMap<ServerId, RwLock<HashMap<BlockHash, BlockLocation>>>,
+    block_locations: DashMap<BlockHash, BlockLocation>,
+}
+
+impl KvMetaIndex {
+    pub fn new() -> Self {
+        Self {
+            index: DashMap::new(),
+            server_blocks: DashMap::new(),
+            block_locations: DashMap::new(),
+        }
+    }
+
+    pub fn store_blocks(
+        &self,
+        server_id: ServerId,
+        blocks: &[BlockHashInfo],
+    ) -> Vec<StoreBlockResult> {
+        let matched_len = self.match_len_for_server(server_id, blocks);
+        let mut results = Vec::with_capacity(blocks.len().saturating_sub(matched_len));
+
+        self.server_blocks
+            .entry(server_id)
+            .or_insert_with(|| RwLock::new(HashMap::new()));
+
+        for info in blocks.iter().copied().skip(matched_len) {
+            let key = (info.position, info.local_hash);
+            let entry = self
+                .index
+                .entry(key)
+                .and_modify(|entry| {
+                    results.push(entry.insert(info, server_id));
+                })
+                .or_insert_with(|| {
+                    results.push(StoreBlockResult {
+                        seq_hash: info.seq_hash,
+                        replica_count: 1,
+                        server_added: true,
+                    });
+                    SeqEntry::new(info, server_id)
+                });
+            drop(entry);
+
+            let location = BlockLocation {
+                position: info.position,
+                local_hash: info.local_hash,
+            };
+            self.block_locations.insert(info.seq_hash, location);
+
+            if let Some(server_map) = self.server_blocks.get(&server_id) {
+                server_map
+                    .write()
+                    .expect("server block map poisoned")
+                    .insert(info.seq_hash, location);
+            }
+        }
+
+        results
+    }
+
+    pub fn add_server(&self, seq_hash: BlockHash, server_id: ServerId) -> bool {
+        let Some(location) = self.location(seq_hash) else {
+            return false;
+        };
+        let key = (location.position, location.local_hash);
+        let Some(mut entry) = self.index.get_mut(&key) else {
+            return false;
+        };
+        let Some(state) = entry.get_mut(seq_hash) else {
+            return false;
+        };
+
+        let server_added = state.servers.insert(server_id);
+        drop(entry);
+
+        if server_added {
+            self.server_blocks
+                .entry(server_id)
+                .or_insert_with(|| RwLock::new(HashMap::new()));
+            if let Some(server_map) = self.server_blocks.get(&server_id) {
+                server_map
+                    .write()
+                    .expect("server block map poisoned")
+                    .insert(seq_hash, location);
+            }
+        }
+
+        server_added
+    }
+
+    pub fn remove_server(&self, seq_hash: BlockHash, server_id: ServerId) -> bool {
+        let Some(location) = self.location(seq_hash) else {
+            return false;
+        };
+
+        if let Some(server_map) = self.server_blocks.get(&server_id) {
+            server_map
+                .write()
+                .expect("server block map poisoned")
+                .remove(&seq_hash);
+        }
+
+        let key = (location.position, location.local_hash);
+        let Some(mut entry) = self.index.get_mut(&key) else {
+            return false;
+        };
+        let removed = entry.remove_server(seq_hash, server_id);
+        drop(entry);
+
+        if removed.seq_removed {
+            self.block_locations.remove(&seq_hash);
+        }
+        if removed.entry_empty {
+            self.index.remove(&key);
+        }
+
+        removed.seq_removed || self.location(seq_hash).is_some()
+    }
+
+    pub fn remove_block(&self, seq_hash: BlockHash) -> Option<KvBlockSnapshot> {
+        let snapshot = self.get_block(seq_hash)?;
+        for server_id in &snapshot.servers {
+            if let Some(server_map) = self.server_blocks.get(server_id) {
+                server_map
+                    .write()
+                    .expect("server block map poisoned")
+                    .remove(&seq_hash);
+            }
+        }
+
+        let location = self.location(seq_hash)?;
+        let key = (location.position, location.local_hash);
+        if let Some(mut entry) = self.index.get_mut(&key) {
+            match &mut *entry {
+                SeqEntry::Single(existing_hash, _) if *existing_hash == seq_hash => {
+                    drop(entry);
+                    self.index.remove(&key);
+                },
+                SeqEntry::Multi(map) => {
+                    map.remove(&seq_hash);
+                    let empty = map.is_empty();
+                    drop(entry);
+                    if empty {
+                        self.index.remove(&key);
+                    }
+                },
+                _ => {},
+            }
+        }
+        self.block_locations.remove(&seq_hash);
+        Some(snapshot)
+    }
+
+    pub fn increment_ref_count(&self, seq_hash: BlockHash) -> Option<u64> {
+        let location = self.location(seq_hash)?;
+        let key = (location.position, location.local_hash);
+        let mut entry = self.index.get_mut(&key)?;
+        let state = entry.get_mut(seq_hash)?;
+        state.ref_count = state.ref_count.saturating_add(1);
+        Some(state.ref_count)
+    }
+
+    pub fn get_block(&self, seq_hash: BlockHash) -> Option<KvBlockSnapshot> {
+        let location = self.location(seq_hash)?;
+        self.get_block_at(seq_hash, location)
+    }
+
+    pub fn contains_server(&self, seq_hash: BlockHash, server_id: ServerId) -> bool {
+        self.get_block(seq_hash)
+            .map(|snapshot| snapshot.servers.contains(&server_id))
+            .unwrap_or(false)
+    }
+
+    pub fn replica_count(&self, seq_hash: BlockHash) -> u32 {
+        self.get_block(seq_hash)
+            .map(|snapshot| snapshot.servers.len() as u32)
+            .unwrap_or(0)
+    }
+
+    pub fn find_matches(&self, blocks: &[BlockHashInfo]) -> Vec<(ServerId, u32)> {
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let mut active_servers: Option<HashSet<ServerId>> = None;
+        let mut matched_offsets: HashMap<ServerId, u32> = HashMap::new();
+
+        for info in blocks {
+            let Some(state) = self.get_state_for_info(*info) else {
+                break;
+            };
+            let state_servers: HashSet<ServerId> = state.servers.into_iter().collect();
+
+            if let Some(active) = &mut active_servers {
+                active.retain(|server_id| state_servers.contains(server_id));
+                if active.is_empty() {
+                    break;
+                }
+                for server_id in active.iter() {
+                    matched_offsets
+                        .entry(*server_id)
+                        .and_modify(|count| *count += info.offset)
+                        .or_insert(info.offset);
+                }
+            } else {
+                for server_id in &state_servers {
+                    matched_offsets.insert(*server_id, info.offset);
+                }
+                active_servers = Some(state_servers);
+            }
+        }
+
+        matched_offsets.into_iter().collect()
+    }
+
+    pub fn match_len_for_server(&self, server_id: ServerId, blocks: &[BlockHashInfo]) -> usize {
+        let Some(server_map) = self.server_blocks.get(&server_id) else {
+            return 0;
+        };
+        let server_map = server_map.read().expect("server block map poisoned");
+        let mut matched = 0;
+        for info in blocks {
+            let Some(location) = server_map.get(&info.seq_hash) else {
+                break;
+            };
+            if location.position != info.position || location.local_hash != info.local_hash {
+                break;
+            }
+            matched += 1;
+        }
+        matched
+    }
+
+    fn get_state_for_info(&self, info: BlockHashInfo) -> Option<KvBlockSnapshot> {
+        let entry = self.index.get(&(info.position, info.local_hash))?;
+        let state = entry.get(info.seq_hash)?;
+        Some(KvBlockSnapshot {
+            meta: state.meta,
+            servers: state.servers.iter().copied().collect(),
+            ref_count: state.ref_count,
+        })
+    }
+
+    fn get_block_at(
+        &self,
+        seq_hash: BlockHash,
+        location: BlockLocation,
+    ) -> Option<KvBlockSnapshot> {
+        let entry = self.index.get(&(location.position, location.local_hash))?;
+        let state = entry.get(seq_hash)?;
+        Some(KvBlockSnapshot {
+            meta: state.meta,
+            servers: state.servers.iter().copied().collect(),
+            ref_count: state.ref_count,
+        })
+    }
+
+    fn location(&self, seq_hash: BlockHash) -> Option<BlockLocation> {
+        self.block_locations
+            .get(&seq_hash)
+            .map(|location| *location)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataServer {
-    /// 推理实例的id
     pub id: u32,
-
-    /// ip
     pub ip: IpAddr,
-
-    /// http端口
     pub http_port: u16,
-
-    /// zmq端口
     pub init_port: u16,
-
-    /// rpc端口
     pub rpc_port: u16,
-
-    /// 实例部署的模型名称
     pub model_name: String,
-
-    /// 实例服务URL
     pub url: String,
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaServer {
-    /// 元数据管理器id
     pub id: u32,
-
-    /// 存储机器的ip
     pub ip: IpAddr,
-
-    /// kvcache数据服务器的端口
     pub port: u16,
-
-    /// 网络层级（云、边）
     pub layer: u32,
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateKvOp{
-
-    pub token_hash: [u8; 32],
-
+pub struct UpdateKvOp {
+    pub token_hash: BlockHash,
     pub operation: u32,
-
-    pub server_id: u32, 
-
+    pub server_id: u32,
 }
 
-/// KV块的唯一标识键
-// #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-// pub struct KvBlockKey {
-//     pub model_hash: i64,
-//     pub token_hash: i64,
-// }
-/// 全局块ID生成器
-// pub struct BlockIdGenerator {
-//     counter: AtomicU64,
-//     node_id: u32,
-// }
-
+impl From<BlockHashInfo> for KvBlockMeta {
+    fn from(info: BlockHashInfo) -> Self {
+        Self {
+            seq_hash: info.seq_hash,
+            local_hash: info.local_hash,
+            position: info.position,
+            offset: info.offset,
+        }
+    }
+}
 
 impl Default for DataServer {
     fn default() -> Self {
         Self {
             id: 0,
-            // 默认0.0.0.0
-            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
-            // 默认端口0
+            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             http_port: 0,
             init_port: 0,
-            rpc_port: 0,    
+            rpc_port: 0,
             model_name: "default_model_name".to_string(),
             url: "default_url".to_string(),
         }
@@ -125,20 +494,16 @@ impl Default for MetaServer {
     fn default() -> Self {
         Self {
             id: 0,
-            // 默认0.0.0.0
-            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 
-            // 默认端口0
+            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             port: 0,
-            // 默认云侧         
-            layer: 0,     
+            layer: 0,
         }
     }
 }
 
 impl MetaServer {
-    /// 生成一个稳定的 u32 哈希 ID
     pub fn hash_id(&self) -> u32 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.ip.hash(&mut hasher);
         self.port.hash(&mut hasher);
         self.layer.hash(&mut hasher);
@@ -146,280 +511,104 @@ impl MetaServer {
     }
 }
 
-impl RefCount {
-    pub fn new() -> Self {
-        RefCount {
-            local_incremental_count: DashMap::new(),
-            local_ref_counts: DashMap::new(),
-            global_ref_counts: DashMap::new(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    fn hash(byte: u8) -> BlockHash {
+        let mut value = [0u8; 32];
+        value[0] = byte;
+        value
+    }
+
+    fn info(position: usize, local: u8, seq: u8, offset: u32) -> BlockHashInfo {
+        BlockHashInfo {
+            position,
+            local_hash: hash(local),
+            seq_hash: hash(seq),
+            offset,
         }
     }
 
-    /// 启动定时清空任务
-    /// 
-    /// # 参数
-    /// - `interval`: 清空间隔时间
-    /// 
-    /// # 示例
-    /// ```
-    /// let ref_count = Arc::new(RefCount::new());
-    /// RefCount::start_periodic_clear(ref_count.clone(), Duration::from_secs(60));
-    /// ```
-    pub fn start_periodic_clear(ref_count: Arc<RefCount>, interval: Duration) {
-        tokio::spawn(async move {
-            let mut interval_timer = time::interval(interval);
-            loop {
-                interval_timer.tick().await;
-                ref_count.clear_and_consolidate_incremental_counts();
-            }
-        });
+    #[test]
+    fn store_and_find_prefix_matches() {
+        let index = KvMetaIndex::new();
+        let blocks = vec![info(0, 10, 20, 4), info(1, 11, 21, 4)];
+
+        let stored = index.store_blocks(7, &blocks);
+        assert_eq!(stored.len(), 2);
+        assert_eq!(index.match_len_for_server(7, &blocks), 2);
+
+        let matches = index.find_matches(&blocks);
+        assert_eq!(matches, vec![(7, 8)]);
     }
 
-    /// 清空增量计数并合并到完整计数
-    /// 
-    /// 该方法会遍历所有增量计数，将其合并到对应的完整计数中，然后清空增量计数
-    pub fn clear_and_consolidate_incremental_counts(&self) {
-        // 遍历所有增量计数
-        for entry in self.local_incremental_count.iter() {
-            let token_hash = *entry.key();
-            let incremental = *entry.value();
-            
-            if incremental > 0 {
-                // 更新本地完整计数
-                self.local_ref_counts
-                    .entry(token_hash)
-                    .and_modify(|c| *c += incremental)
-                    .or_insert(incremental);
-            }
+    #[test]
+    fn supports_multiple_seq_hashes_at_same_position_and_local_hash() {
+        let index = KvMetaIndex::new();
+        let first = info(0, 10, 20, 4);
+        let second = info(0, 10, 21, 4);
+
+        index.store_blocks(1, &[first]);
+        index.store_blocks(2, &[second]);
+
+        assert_eq!(index.find_matches(&[first]), vec![(1, 4)]);
+        assert_eq!(index.find_matches(&[second]), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn remove_server_cleans_empty_blocks() {
+        let index = KvMetaIndex::new();
+        let block = info(0, 10, 20, 4);
+
+        index.store_blocks(1, &[block]);
+        index.store_blocks(2, &[block]);
+        assert_eq!(index.replica_count(block.seq_hash), 2);
+
+        assert!(index.remove_server(block.seq_hash, 1));
+        assert!(!index.contains_server(block.seq_hash, 1));
+        assert!(index.contains_server(block.seq_hash, 2));
+        assert_eq!(index.replica_count(block.seq_hash), 1);
+
+        assert!(index.remove_server(block.seq_hash, 2));
+        assert!(index.get_block(block.seq_hash).is_none());
+        assert_eq!(index.replica_count(block.seq_hash), 0);
+    }
+
+    #[test]
+    fn concurrent_store_and_ref_count_updates() {
+        let index = Arc::new(KvMetaIndex::new());
+        let blocks = vec![info(0, 10, 20, 4), info(1, 11, 21, 4)];
+
+        let mut handles = Vec::new();
+        for server_id in 0..8 {
+            let index = Arc::clone(&index);
+            let blocks = blocks.clone();
+            handles.push(thread::spawn(move || {
+                index.store_blocks(server_id, &blocks);
+            }));
         }
-        
-        // 清空增量计数
-        self.local_incremental_count.clear();
-    }
-
-    /// 增加本地增量计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `increment`: 增量值
-    pub fn increment_local_incremental_count(&self, token_hash: [u8; 32], increment: u64) {
-        self.local_incremental_count
-            .entry(token_hash)
-            .and_modify(|c| *c += increment)
-            .or_insert(increment);
-    }
-
-    /// 批量增加本地增量计数
-    /// 
-    /// # 参数
-    /// - `token_hashes`: 块 ID 列表
-    /// - `increment`: 每个块的增量值
-    pub fn batch_increment_local_incremental_count(&self, token_hashes: &[[u8; 32]], increment: u64) {
-        for &token_hash in token_hashes {
-            self.local_incremental_count
-                .entry(token_hash)
-                .and_modify(|c| *c += increment)
-                .or_insert(increment);
-            self.global_ref_counts
-                .entry(token_hash)
-                .and_modify(|c| *c += increment)
-                .or_insert(increment);
+        for handle in handles {
+            handle.join().unwrap();
         }
-    }
 
-    /// 插入或更新本地完整引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `count`: 计数值
-    /// 
-    /// # 返回
-    /// - `Some(old_count)`: 更新已存在的块，返回旧值
-    /// - `None`: 插入新块
-    pub fn insert_or_update_local_ref_count(&self, token_hash: [u8; 32], count: u64) -> Option<u64> {
-        self.local_ref_counts.insert(token_hash, count)
-    }
+        assert_eq!(index.replica_count(blocks[0].seq_hash), 8);
 
-    /// 增加本地完整引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `increment`: 增量值
-    pub fn increment_local_ref_count(&self, token_hash: [u8; 32], increment: u64) -> u64 {
-        self.local_ref_counts
-            .entry(token_hash)
-            .and_modify(|c| *c += increment)
-            .or_insert(increment)
-            .clone()
-    }
-
-
-
-    /// 合并指定块的增量计数到完整计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// 
-    /// # 返回
-    /// - `Some(total_count)`: 合并后的总计数
-    /// - `None`: 该块不存在增量计数
-    pub fn consolidate_local_ref_count(&self, token_hash: [u8; 32]) -> Option<u64> {
-        if let Some((_, incremental)) = self.local_incremental_count.remove(&token_hash) {
-            if incremental > 0 {
-                let total = self.local_ref_counts
-                    .entry(token_hash)
-                    .and_modify(|c| *c += incremental)
-                    .or_insert(incremental)
-                    .clone();
-                return Some(total);
-            }
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let index = Arc::clone(&index);
+            let seq_hash = blocks[0].seq_hash;
+            handles.push(thread::spawn(move || {
+                index.increment_ref_count(seq_hash);
+            }));
         }
-        self.local_ref_counts.get(&token_hash).map(|v| *v)
-    }
-
-    /// 获取本地块的总引用计数(完整计数 + 增量计数)
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// 
-    /// # 返回
-    /// - `Some(total)`: 总计数
-    /// - `None`: 该块不存在任何计数
-    pub fn get_local_total_count(&self, token_hash: [u8; 32]) -> Option<u64> {
-        let full_count = self.local_ref_counts.get(&token_hash).map(|v| *v).unwrap_or(0);
-        let incremental_count = self.local_incremental_count.get(&token_hash).map(|v| *v).unwrap_or(0);
-        
-        if full_count == 0 && incremental_count == 0 {
-            None
-        } else {
-            Some(full_count + incremental_count)
+        for handle in handles {
+            handle.join().unwrap();
         }
-    }
 
-    /// 插入或更新全局引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `count`: 新的计数值
-    /// 
-    /// # 返回
-    /// - `Some(old_count)`: 更新已存在的块，返回旧值
-    /// - `None`: 插入新块
-    pub fn insert_or_update_global_ref_count(&self, token_hash: [u8; 32], count: u64) -> Option<u64> {
-        self.global_ref_counts.insert(token_hash, count)
-    }
-
-    /// 增加全局引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `increment`: 增量值
-    pub fn increment_global_ref_count(&self, token_hash: [u8; 32], increment: u64) -> u64 {
-        // 判断id是否在本地存在，存在则增加本地计数
-        if self.local_ref_counts.contains_key(&token_hash) {
-            self.increment_local_ref_count(token_hash, increment)
-        }else{
-            self.global_ref_counts
-            .entry(token_hash)
-            .and_modify(|c| *c += increment)
-            .or_insert(increment)
-            .clone()
-        }
-        
-    }
-
-    /// 减少全局引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// - `decrement`: 减量值
-    pub fn decrement_global_ref_count(&self, token_hash: [u8; 32], decrement: u64) -> Option<u64> {
-        self.global_ref_counts.get_mut(&token_hash).map(|mut entry| {
-            *entry = entry.saturating_sub(decrement);
-            *entry
-        })
-    }
-
-    /// 删除本地引用计数（包括增量和完整计数）
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    /// 
-    /// # 返回
-    /// - `(full_count, incremental_count)`: 删除的计数值
-    pub fn remove_local_ref_count(&self, token_hash: [u8; 32]) -> (Option<u64>, Option<u64>) {
-        let full = self.local_ref_counts.remove(&token_hash).map(|(_, v)| v);
-        let incremental = self.local_incremental_count.remove(&token_hash).map(|(_, v)| v);
-        (full, incremental)
-    }
-
-    /// 删除全局引用计数
-    /// 
-    /// # 参数
-    /// - `token_hash`: 块 ID
-    pub fn remove_global_ref_count(&self, token_hash: [u8; 32]) -> Option<u64> {
-        self.global_ref_counts.remove(&token_hash).map(|(_, v)| v)
-    }
-
-    /// 批量更新全局引用计数
-    /// 
-    /// # 参数
-    /// - `updates`: (token_hash, count) 元组的向量
-    pub fn batch_update_global_ref_counts(&self, updates: Vec<([u8; 32], u64)>) {
-        for (token_hash, count) in updates {
-            self.insert_or_update_global_ref_count(token_hash, count);
-        }
-    }
-
-    /// 清除本地引用计数（包括增量和完整计数）
-    pub fn clear_local_ref_counts(&self) {
-        self.local_ref_counts.clear();
-        self.local_incremental_count.clear();
-    }
-
-    /// 获取所有本地块的总引用计数(完整计数 + 增量计数)
-    /// 
-    /// # 返回
-    /// - `Vec<(token_hash, total_count)>`: 所有块的 ID 和总计数
-    pub fn get_all_local_total_counts(&self) -> Vec<([u8; 32], u64)> {
-        use std::collections::HashMap;
-        
-        let mut counts: HashMap<[u8; 32], u64> = HashMap::new();
-        
-        // 收集所有完整计数
-        for entry in self.local_ref_counts.iter() {
-            counts.insert(*entry.key(), *entry.value());
-        }
-        
-        // 累加增量计数
-        for entry in self.local_incremental_count.iter() {
-            counts.entry(*entry.key())
-                .and_modify(|c| *c += *entry.value())
-                .or_insert(*entry.value());
-        }
-        
-        // 转换为 Vec 并返回
-        counts.into_iter().collect()
-    }
-}
-
-
-
-impl KvBlockMeta {
-    /// 检查tokens是否完全匹配
-    pub fn tokens_match(&self, token_hash: [u8; 32]) -> bool {
-        self.token_hash == token_hash
-    }
-
-    /// 添加副本服务器
-    pub fn add_replica(&mut self, server_id: u32) {
-        if !self.server_id.contains(&server_id) {
-            self.server_id.push(server_id);
-        }
-    }
-
-    /// 移除副本服务器
-    pub fn remove_replica(&mut self, server_id: u32) {
-        self.server_id.retain(|&id| id != server_id);
+        let snapshot = index.get_block(blocks[0].seq_hash).unwrap();
+        assert_eq!(snapshot.ref_count, 16);
     }
 }

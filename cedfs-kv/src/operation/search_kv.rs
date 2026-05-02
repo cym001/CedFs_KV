@@ -1,5 +1,8 @@
-use cedfs_proto::kvcache::{KvBlockPos, SearchKvBlockResponse, SearchResult, SearchKvBlockByPromptsResponse};
+use cedfs_proto::kvcache::{
+    KvBlockPos, SearchKvBlockByPromptsResponse, SearchKvBlockResponse, SearchResult,
+};
 
+use crate::types::BlockHashInfo;
 use crate::Shared;
 
 pub struct SearchKvOp {
@@ -23,26 +26,25 @@ impl SearchKvOp {
                 continue;
             }
 
-            let token_hashes = self
+            let block_infos = self
                 .shared
                 .hasher
-                .hash_tokens_with_blocks_all(&token_list, self.shared.config.block_size)
-                .iter()
-                .map(|(hash, _offset)| hash.to_u256())
-                .collect();
+                .hash_tokens_with_block_infos_all(&token_list, self.shared.config.block_size);
 
             // 使用 search_tokens 查找所有 server 的匹配结果
-            let match_results = self.shared.search_tokens(token_hashes);
+            let match_results = self.shared.search_tokens_by_infos(&block_infos);
 
             // 生成最终结果：为每个匹配的 server_id 创建 KvBlockPos
             // 从全局数据节点集合中查找
             for (server_id, matched_length) in match_results {
                 // 首先通过映射找到该 data_server 所属的 meta_server
-                if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&server_id) {
+                if let Some(meta_server_id) = self.shared.data_server_to_meta_server.get(&server_id)
+                {
                     let meta_id = *meta_server_id;
-                    
+
                     // 从 global_data_server_collect 中查找对应的 DataServer 信息
-                    if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id) {
+                    if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id)
+                    {
                         if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
                             let url = format!("{}:{}", data_server.ip, data_server.http_port);
                             let kv_block_pos = KvBlockPos {
@@ -75,7 +77,7 @@ impl SearchKvByPromptsOp {
         shared: &Shared,
         model_name: &str,
         prompt: &str,
-    ) -> Option<Vec<[u8; 32]>> {
+    ) -> Option<Vec<BlockHashInfo>> {
         let token_list = shared
             .tokenizer_manager
             .encode_async(model_name, prompt)
@@ -87,22 +89,19 @@ impl SearchKvByPromptsOp {
         if token_list.is_empty() {
             return None;
         }
-        let token_hashes = shared
+        let block_infos = shared
             .hasher
-            .hash_tokens_with_blocks_all(&token_list, shared.config.block_size)
-            .iter()
-            .map(|(hash, _offset)| hash.to_u256())
-            .collect();
-        Some(token_hashes)
+            .hash_tokens_with_block_infos_all(&token_list, shared.config.block_size);
+        Some(block_infos)
     }
 
     /// 对 token_hashes 执行 search_tokens，再根据匹配结果和 model_name 从全局数据节点集合中生成 KvBlockPos 列表
     fn match_results_to_block_pos(
         shared: &Shared,
-        token_hashes: &[[u8; 32]],
+        block_infos: &[BlockHashInfo],
         model_name: &str,
     ) -> Vec<KvBlockPos> {
-        let match_results = shared.search_tokens(token_hashes.to_vec());
+        let match_results = shared.search_tokens_by_infos(block_infos);
         let mut block_pos = Vec::new();
         for (server_id, matched_length) in match_results {
             if let Some(meta_server_id) = shared.data_server_to_meta_server.get(&server_id) {
@@ -137,18 +136,11 @@ impl SearchKvByPromptsOp {
             }
 
             for model_name in self.model_names.iter() {
-                if let Some(token_hashes) = Self::search_one_prompt_one_model(
-                    &self.shared,
-                    model_name,
-                    prompt,
-                )
-                .await
+                if let Some(block_infos) =
+                    Self::search_one_prompt_one_model(&self.shared, model_name, prompt).await
                 {
-                    let positions = Self::match_results_to_block_pos(
-                        &self.shared,
-                        &token_hashes,
-                        model_name,
-                    );
+                    let positions =
+                        Self::match_results_to_block_pos(&self.shared, &block_infos, model_name);
                     search_result.block_pos.extend(positions);
                 }
             }

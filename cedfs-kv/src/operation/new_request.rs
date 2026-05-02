@@ -40,14 +40,15 @@ impl NewRequestOp {
             );
         }
 
-        let hash_results = self
+        let block_infos = self
             .shared
             .hasher
-            .hash_tokens_with_blocks_all(&self.tokens, self.shared.config.block_size);
-        let token_hashes: Vec<[u8; 32]> = hash_results
-            .iter()
-            .map(|(hash, _offset)| hash.to_u256())
-            .collect();
+            .hash_tokens_with_block_infos_all(&self.tokens, self.shared.config.block_size);
+        let token_hashes: Vec<[u8; 32]> = block_infos.iter().map(|info| info.seq_hash).collect();
+
+        for info in &block_infos {
+            self.shared.kv_meta_index.increment_ref_count(info.seq_hash);
+        }
 
         // tracing::info!(
         //     "New Request - server_id: {}, blocks: {}, hashes: {:?}",
@@ -61,7 +62,10 @@ impl NewRequestOp {
             .active_squence
             .add_request(self.request_id.clone(), Some(token_hashes.clone()));
 
-        let hold_counts = self.shared.active_squence.sequence_hold_counts(&token_hashes);
+        let hold_counts = self
+            .shared
+            .active_squence
+            .sequence_hold_counts(&token_hashes);
         let high_hold_blocks: Vec<([u8; 32], u64)> = token_hashes
             .iter()
             .zip(hold_counts.iter())
@@ -81,7 +85,7 @@ impl NewRequestOp {
                 MIGRATION_TRIGGER_THRESHOLD,
                 high_hold_blocks
             );
-            return Ok(())
+            return Ok(());
         }
 
         let cooldown = Duration::from_secs(MIGRATION_COOLDOWN_SECS);
@@ -113,8 +117,11 @@ impl NewRequestOp {
             return Ok(());
         };
 
-        let pending_task =
-            PendingMigrationTask::new(source_server.id, eligible_blocks.clone(), self.tokens.clone());
+        let pending_task = PendingMigrationTask::new(
+            source_server.id,
+            eligible_blocks.clone(),
+            self.tokens.clone(),
+        );
         self.shared
             .upsert_pending_migration_task(self.request_id.clone(), pending_task);
         tracing::info!(

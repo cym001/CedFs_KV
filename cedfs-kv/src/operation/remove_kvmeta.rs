@@ -2,7 +2,6 @@ use anyhow::Ok;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Shared;
-use crate::types::UpdateKvOp;
 
 pub struct RemoveKvMetaOp {
     pub server_id: u32,
@@ -14,11 +13,15 @@ pub struct RemoveKvMetaOp {
 impl RemoveKvMetaOp {
     pub async fn run(&self) -> anyhow::Result<()> {
         // 将 Vec<u8> 分割为 [u8; 32] 的 token_hash 序列
-        let token_hashes: Vec<[u8; 32]> = self.tokens_hash
+        let token_hashes: Vec<[u8; 32]> = self
+            .tokens_hash
             .iter()
             .filter_map(|v| {
                 if v.len() != 32 {
-                    tracing::error!("RemoveKvMetaOp: Invalid token hash length {}, expected 32", v.len());
+                    tracing::error!(
+                        "RemoveKvMetaOp: Invalid token hash length {}, expected 32",
+                        v.len()
+                    );
                     None
                 } else {
                     let mut arr = [0u8; 32];
@@ -49,48 +52,23 @@ impl RemoveKvMetaOp {
                         .local_kv_cache_block_count
                         .entry(self.server_id)
                         .or_insert_with(|| AtomicUsize::new(0));
-                    let _ = counter.fetch_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |v| v.checked_sub(1),
-                    );
+                    let _ = counter
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
                 }
             }
 
-            // 2. 从 global_kvcache_table 中移除或更新
-            if let Some(mut meta) = self.shared.global_kvcache_table.get_mut(token_hash) {
-                
-                // 从 server_id 列表中移除当前服务器
-                meta.server_id.retain(|&id| id != self.server_id);
-                
-                // 如果没有服务器持有该块，则完全删除
-                if meta.server_id.is_empty() {
-                    drop(meta); // 释放可变引用
-                    self.shared.remove_global_kvcache(*token_hash);
-                    self.shared.ref_count.remove_global_ref_count(*token_hash);
-                    tracing::debug!(
-                        "RemoveKvMetaOp: Completely removed token_hash {:?} from global cache",
-                        token_hash
-                    );
-                } else {
-                    tracing::debug!(
-                        "RemoveKvMetaOp: Updated token_hash {:?}, remaining servers: {:?}",
-                        token_hash,
-                        meta.server_id
-                    );
-                }
+            // 2. 从 KV 元数据索引中移除当前服务器副本
+            let before = self.shared.kv_meta_index.replica_count(*token_hash);
+            let removed = self
+                .shared
+                .kv_meta_index
+                .remove_server(*token_hash, self.server_id);
+            if removed && before <= 1 {
+                tracing::debug!(
+                    "RemoveKvMetaOp: Completely removed token_hash {:?} from kv_meta_index",
+                    token_hash
+                );
             }
-
-            // 3. 添加删除操作到 update_kvop_table
-            let update_op = UpdateKvOp {
-                token_hash: *token_hash,
-                operation: 2, // 删除副本操作
-                server_id: self.shared.config.local_meta_server.hash_id(),
-            };
-            self.shared.insert_update_kvop(update_op);
-
-            // 4. 从本地引用计数中移除
-            self.shared.ref_count.remove_local_ref_count(*token_hash);
         }
 
         tracing::info!(

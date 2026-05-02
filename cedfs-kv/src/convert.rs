@@ -1,9 +1,9 @@
-use std::net::{IpAddr};
+use std::net::IpAddr;
 
 // use cedfs_proto::kvcache::KvBlockMeta as ProtoKvBlockMeta;
 // use cedfs_proto::kvcache::MetaServer as ProtoMetaServer;
 
-use crate::types::{KvBlockMeta, MetaServer, DataServer, UpdateKvOp};
+use crate::types::DataServer;
 
 // Proto -> Internal 转换
 // impl From<ProtoKvBlockMeta> for KvBlockMeta {
@@ -30,7 +30,6 @@ use crate::types::{KvBlockMeta, MetaServer, DataServer, UpdateKvOp};
 //         }
 //     }
 // }
-
 
 // MetaServer 转换
 // impl From<ProtoMetaServer> for MetaServer {
@@ -60,15 +59,18 @@ impl From<cedfs_proto::kvcache::DataServer> for DataServer {
     fn from(proto: cedfs_proto::kvcache::DataServer) -> Self {
         DataServer {
             id: proto.id,
-            ip: proto.ip.parse().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-            http_port: proto.http_port as u16,  
+            ip: proto
+                .ip
+                .parse()
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            http_port: proto.http_port as u16,
             init_port: proto.init_port as u16,
             rpc_port: proto.rpc_port as u16,
             model_name: proto.model_name,
             url: proto.url,
         }
     }
-}   
+}
 impl From<DataServer> for cedfs_proto::kvcache::DataServer {
     fn from(internal: DataServer) -> Self {
         cedfs_proto::kvcache::DataServer {
@@ -82,7 +84,6 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
         }
     }
 }
-
 
 //UpdateKvOp转换
 // impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
@@ -103,7 +104,7 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
 //             server_id: internal.server_id,
 //         }
 //     }
-    
+
 // }
 
 pub fn hash2bytes(a: [u8; 32]) -> Vec<u8> {
@@ -128,7 +129,10 @@ pub fn vecbytes2vechash(v: Vec<Vec<u8>>) -> Vec<[u8; 32]> {
     let mut out = Vec::with_capacity(v.len());
     for item in v {
         if item.len() != 32 {
-            tracing::error!("vecbytes2vechash: item length must be 32, got {}", item.len());
+            tracing::error!(
+                "vecbytes2vechash: item length must be 32, got {}",
+                item.len()
+            );
             continue;
         }
         let mut arr = [0u8; 32];
