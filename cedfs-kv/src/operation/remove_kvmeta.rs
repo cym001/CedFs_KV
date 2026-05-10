@@ -42,21 +42,6 @@ impl RemoveKvMetaOp {
 
         // 遍历每个 token_hash 进行删除操作
         for token_hash in token_hashes.iter() {
-            // 1. 从 local_kv_index 中移除
-            {
-                let mut local_index = self.shared.local_kv_index.write().await;
-                let removed = local_index.remove(token_hash);
-                if removed {
-                    let counter = self
-                        .shared
-                        .local_kv_cache_block_count
-                        .entry(self.server_id)
-                        .or_insert_with(|| AtomicUsize::new(0));
-                    let _ = counter
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
-                }
-            }
-
             // 2. 从 KV 元数据索引中移除当前服务器副本
             let before = self.shared.kv_meta_index.replica_count(*token_hash);
             let removed = self

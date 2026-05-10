@@ -84,12 +84,6 @@ pub struct Shared {
     // 分词器
     pub tokenizer_manager: Arc<TokenizerManager>,
 
-    // 本地KV块索引
-    pub local_kv_index: Arc<RwLock<HashSet<[u8; 32]>>>,
-
-    // 每个 dataserver 持有的本地 KV Cache 块数量
-    pub local_kv_cache_block_count: Arc<DashMap<u32, AtomicUsize>>,
-
     // 全局 KV 元数据索引
     pub kv_meta_index: Arc<KvMetaIndex>,
 
@@ -190,8 +184,6 @@ impl KVServer {
                     data_server_to_meta_server: Arc::new(DashMap::new()),
                     hasher: Arc::new(hasher),
                     tokenizer_manager,
-                    local_kv_index: Arc::new(RwLock::new(HashSet::new())),
-                    local_kv_cache_block_count: Arc::new(DashMap::new()),
                     kv_meta_index: Arc::new(KvMetaIndex::new()),
                     config: Arc::new(config),
                     recent_migrations: Arc::new(DashMap::new()),
@@ -275,30 +267,6 @@ impl Shared {
         s
     }
 
-    /// 插入本地 KV 索引
-    ///
-    /// # 参数
-    /// - `token_hash`: 要插入的块hash
-    ///
-    /// # 返回
-    /// - `true`: 更新已存在的块
-    /// - `false`: 插入新块
-    pub async fn insert_local_kvcache(&self, token_hash: [u8; 32], server_id: u32) -> bool {
-        let mut local_table = self.local_kv_index.write().await;
-
-        if local_table.contains(&token_hash) {
-            // 块已存在，不需要更新
-            true
-        } else {
-            // 块不存在，插入新块
-            local_table.insert(token_hash);
-            self.local_kv_cache_block_count
-                .entry(server_id)
-                .or_insert_with(|| AtomicUsize::new(0))
-                .fetch_add(1, Ordering::Relaxed);
-            false
-        }
-    }
 
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
     ///
@@ -340,12 +308,6 @@ impl Shared {
         let mut replica_counts = Vec::with_capacity(store_results.len());
 
         for result in store_results {
-            if result.server_added {
-                self.local_kv_cache_block_count
-                    .entry(server_id)
-                    .or_insert_with(|| AtomicUsize::new(0))
-                    .fetch_add(1, Ordering::Relaxed);
-            }
             replica_counts.push((result.seq_hash, result.replica_count));
         }
 
@@ -603,7 +565,6 @@ impl Shared {
     /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
     async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
         self.kv_meta_index.add_server(token_hash, new_server_id);
-        let _ = self.insert_local_kvcache(token_hash, new_server_id).await;
     }
 
     /// 若 concurrent_count > replica_count*2 时，可调用此方法：对单个 token_hash 尝试域内迁移并执行
