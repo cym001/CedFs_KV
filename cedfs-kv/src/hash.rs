@@ -343,29 +343,6 @@ impl TokenHasher {
         HashValue::U256(Sha256::digest(&cbor_bytes).into())
     }
 
-    /// SHA256 分块迭代哈希（返回所有中间哈希值和偏移量）
-    ///
-    /// 将输入 tokens 按照 block_size 分成若干块，迭代计算它们的哈希
-    /// 返回每一步的哈希值和对应的偏移量（块结束位置）
-    ///
-    /// # 参数
-    /// - `tokens`: 输入的 token 序列
-    /// - `block_size`: 每个块的大小
-    ///
-    /// # 返回
-    /// 包含每个块计算后的哈希值和偏移量的 Vec<(HashValue, offset)>
-    /// offset 表示该块在 tokens 中的结束位置（不包含）
-    pub fn hash_tokens_with_blocks_all(
-        &self,
-        tokens: &[u32],
-        block_size: usize,
-    ) -> Vec<(HashValue, u32)> {
-        self.hash_tokens_with_block_infos_all(tokens, block_size)
-            .into_iter()
-            .map(|info| (HashValue::U256(info.seq_hash), info.offset))
-            .collect()
-    }
-
     /// 分块计算本地块哈希和累计序列哈希。
     pub fn hash_tokens_with_block_infos_all(
         &self,
@@ -486,19 +463,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hash_tokens_with_blocks_all() {
+    fn test_hash_tokens_with_block_infos_all() {
         let hasher = TokenHasher::new(HashAlgorithm::Sha256, false, 0, None).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
 
-        let results = hasher.hash_tokens_with_blocks_all(&tokens, 2);
+        let results = hasher.hash_tokens_with_block_infos_all(&tokens, 2);
 
         // 应该有 3 个哈希值和偏移量 (6 tokens / 2 = 3 blocks)
         assert_eq!(results.len(), 3);
 
         // 验证偏移量
-        assert_eq!(results[0].1, 2); // 第一个块结束于位置 2
-        assert_eq!(results[1].1, 2); // 第二个块结束于位置 4
-        assert_eq!(results[2].1, 2); // 第三个块结束于位置 6
+        assert_eq!(results[0].offset, 2); // 第一个块结束于位置 2
+        assert_eq!(results[1].offset, 2); // 第二个块结束于位置 4
+        assert_eq!(results[2].offset, 2); // 第三个块结束于位置 6
+        assert_eq!(results[0].position, 0);
+        assert_eq!(results[1].position, 1);
+        assert_eq!(results[2].position, 2);
     }
 
     #[test]
@@ -680,21 +660,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_cbor_blocks_all() {
+    fn test_sha256_cbor_block_infos_all() {
         let hasher =
             TokenHasher::new(HashAlgorithm::Sha256Cbor, false, 0, Some("0".to_string())).unwrap();
         let tokens: Vec<u32> = vec![1, 2, 3, 4, 5, 6];
-        let results = hasher.hash_tokens_with_blocks_all(&tokens, 2);
+        let results = hasher.hash_tokens_with_block_infos_all(&tokens, 2);
 
         assert_eq!(results.len(), 3);
-        assert_eq!(results[0].1, 2);
-        assert_eq!(results[1].1, 2);
-        assert_eq!(results[2].1, 2);
+        assert_eq!(results[0].offset, 2);
+        assert_eq!(results[1].offset, 2);
+        assert_eq!(results[2].offset, 2);
 
         let mut current_hash = hasher.get_init_hash();
         for (i, chunk) in tokens.chunks(2).enumerate() {
             current_hash = hasher.hash_tokens(chunk, Some(&current_hash), None);
-            assert_eq!(current_hash, results[i].0, "Block {} hash mismatch", i);
+            assert_eq!(
+                current_hash.to_u256(),
+                results[i].seq_hash,
+                "Block {} hash mismatch",
+                i
+            );
         }
     }
 }

@@ -85,28 +85,6 @@ impl From<DataServer> for cedfs_proto::kvcache::DataServer {
     }
 }
 
-//UpdateKvOp转换
-// impl From<cedfs_proto::kvcache::UpdateKvOp> for UpdateKvOp {
-//     fn from(proto: cedfs_proto::kvcache::UpdateKvOp) -> Self {
-//         UpdateKvOp {
-//             token_hash: bytes2hash(proto.token_hash),
-//             operation: proto.operation,
-//             server_id: proto.server_id,
-//         }
-//     }
-// }
-
-// impl From<UpdateKvOp> for cedfs_proto::kvcache::UpdateKvOp {
-//     fn from(internal: UpdateKvOp) -> Self {
-//         cedfs_proto::kvcache::UpdateKvOp {
-//             token_hash: hash2bytes(internal.token_hash),
-//             operation: internal.operation,
-//             server_id: internal.server_id,
-//         }
-//     }
-
-// }
-
 pub fn hash2bytes(a: [u8; 32]) -> Vec<u8> {
     a.to_vec()
 }

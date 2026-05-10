@@ -17,7 +17,7 @@ use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::operation::transfer_kv::TransferKvOp;
 use crate::tokenizers::TokenizerManager;
 use crate::transfer::squnence::ActiveSequences;
-use crate::types::{BlockHashInfo, DataServer, KvBlockMeta, KvMetaIndex, MetaServer};
+use crate::types::{BlockHashInfo, DataServer, KvMetaIndex, MetaServer};
 
 pub mod config;
 pub mod types;
@@ -300,70 +300,6 @@ impl Shared {
         }
     }
 
-    /// 从全局 KV 元数据索引删除块。
-    pub fn remove_global_kvcache(&self, token_hash: [u8; 32]) -> Option<KvBlockMeta> {
-        self.kv_meta_index
-            .remove_block(token_hash)
-            .map(|snapshot| snapshot.meta)
-    }
-
-    /// 获取全局块元数据快照。
-    pub fn get_global_kvcache(&self, token_hash: [u8; 32]) -> Option<KvBlockMeta> {
-        self.kv_meta_index
-            .get_block(token_hash)
-            .map(|snapshot| snapshot.meta)
-    }
-
-    /// 根据 token_hash 列表返回各块副本数，不存在则为 0。
-    pub fn get_replica_counts(&self, token_hashes: Vec<[u8; 32]>) -> Vec<u32> {
-        token_hashes
-            .iter()
-            .map(|h| self.kv_meta_index.replica_count(*h))
-            .collect()
-    }
-
-    /// 对指定 model 和 prompt 编码得到 token_hashes（与 SearchKvByPromptsOp::search_one_prompt_one_model 逻辑一致）
-    pub async fn get_token_hashes_for_prompt(
-        &self,
-        model: &str,
-        prompt: &str,
-    ) -> Option<Vec<[u8; 32]>> {
-        let token_list = self
-            .tokenizer_manager
-            .encode_async(model, prompt)
-            .await
-            .map_err(|e| {
-                tracing::warn!("Failed to encode prompt with model '{}': {}", model, e);
-            })
-            .ok()?;
-        if token_list.is_empty() {
-            return None;
-        }
-        let token_hashes = self
-            .hasher
-            .hash_tokens_with_blocks_all(&token_list, self.config.block_size)
-            .iter()
-            .map(|(hash, _offset)| hash.to_u256())
-            .collect();
-        Some(token_hashes)
-    }
-
-    fn block_infos_from_seq_hashes(&self, token_hashes: &[[u8; 32]]) -> Vec<BlockHashInfo> {
-        let mut blocks = Vec::with_capacity(token_hashes.len());
-        for seq_hash in token_hashes {
-            let Some(snapshot) = self.kv_meta_index.get_block(*seq_hash) else {
-                break;
-            };
-            blocks.push(BlockHashInfo {
-                position: snapshot.meta.position,
-                local_hash: snapshot.meta.local_hash,
-                seq_hash: snapshot.meta.seq_hash,
-                offset: snapshot.meta.offset,
-            });
-        }
-        blocks
-    }
-
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
     ///
     /// # 参数
@@ -386,87 +322,8 @@ impl Shared {
         );
     }
 
-    // /// 查找或创建KV块
-    // /// 返回: (token_hash, is_new, is_primary)
-    // pub fn find_or_create_kv_block(
-    //     &self,
-    //     server_id: u32,
-    //     //model_hash: i64,
-    //     token_hash: [u8; 32],
-    // ) -> [u8; 32] {
-    //     // let key = KvBlockKey::new(model_hash, token_hash);
-    //     let key = token_hash;
-
-    //     // 第一步：通过哈希快速查找所有候选块
-    //     if let Some(token_hashs) = self.global_kv_index.get(&key) {
-    //         // 第二步：遍历所有候选块，验证tokens是否完全匹配
-    //         for &token_hash in token_hashs.value() {
-    //             if let Some(meta) = self.local_kvcache_table.get_mut(&token_hash){
-    //                 if meta.tokens_match(&tokens){
-    //                     return token_hash;
-    //                 }
-    //             }
-    //             if let Some(mut meta) = self.global_kvcache_table.get_mut(&token_hash) {
-    //                 if meta.tokens_match(&tokens) {
-    //                     meta.add_replica(server_id);
-    //                     self.local_kvcache_table.insert(token_hash, meta.clone());
-    //                     let update_op = UpdateKvOp{
-    //                         token_hash: meta.token_hash,
-    //                         operation: 1,
-    //                         server_id: server_id,
-    //                     };
-    //                     self.update_kvop_table.insert(meta.token_hash, update_op);
-    //                     self.local_kvcache_table.insert(token_hash, meta.clone());
-    //                     return token_hash;
-    //                 }
-    //             }
-    //         }
-    //         // 哈希相同但tokens不同，这是哈希冲突
-    //         // 继续创建新块，稍后会添加到同一个hash key的列表中
-    //     }
-
-    //     // 未找到匹配的块，创建新块
-    //     let token_hash = self.token_hash_generator.next_id();
-    //     let meta = KvBlockMeta {
-    //         token_hash,
-    //         token_hash,
-    //         //model_hash,
-    //         tokens,
-    //         server_id: vec![server_id],
-    //     };
-
-    //     // 插入元数据
-    //     self.insert_local_kvcache(meta.clone());
-    //     self.insert_remote_kvcache(meta.clone());
-    //     self.insert_update_kvcache(meta);
-
-    //     // 将新的 token_hash 添加到索引的 Vec 中（处理哈希冲突）
-    //     self.global_kv_index
-    //         .entry(key)
-    //         .or_insert_with(Vec::new)
-    //         .push(token_hash);
-
-    //     token_hash
-    // }
-
-    /// 查找 token_hash 序列的最大前缀匹配。
-    pub fn search_tokens(&self, token_hash: Vec<[u8; 32]>) -> Vec<(u32, u32)> {
-        let blocks = self.block_infos_from_seq_hashes(&token_hash);
-        self.kv_meta_index.find_matches(&blocks)
-    }
-
     pub fn search_tokens_by_infos(&self, blocks: &[BlockHashInfo]) -> Vec<(u32, u32)> {
         self.kv_meta_index.find_matches(blocks)
-    }
-
-    /// 查找指定 server_id 的匹配块数量。
-    pub fn search_tokens_with_server(&self, server_id: u32, token_hash: Vec<[u8; 32]>) -> u32 {
-        let blocks = self.block_infos_from_seq_hashes(&token_hash);
-        self.kv_meta_index.match_len_for_server(server_id, &blocks) as u32
-    }
-
-    pub fn search_block_infos_with_server(&self, server_id: u32, blocks: &[BlockHashInfo]) -> u32 {
-        self.kv_meta_index.match_len_for_server(server_id, blocks) as u32
     }
 
     /// 创建新的 KV 块。

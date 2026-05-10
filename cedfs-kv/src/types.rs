@@ -458,13 +458,6 @@ pub struct MetaServer {
     pub layer: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateKvOp {
-    pub token_hash: BlockHash,
-    pub operation: u32,
-    pub server_id: u32,
-}
-
 impl From<BlockHashInfo> for KvBlockMeta {
     fn from(info: BlockHashInfo) -> Self {
         Self {

@@ -31,7 +31,7 @@ impl SearchKvOp {
                 .hasher
                 .hash_tokens_with_block_infos_all(&token_list, self.shared.config.block_size);
 
-            // 使用 search_tokens 查找所有 server 的匹配结果
+            // 使用新索引查找所有 server 的匹配结果
             let match_results = self.shared.search_tokens_by_infos(&block_infos);
 
             // 生成最终结果：为每个匹配的 server_id 创建 KvBlockPos
@@ -95,7 +95,7 @@ impl SearchKvByPromptsOp {
         Some(block_infos)
     }
 
-    /// 对 token_hashes 执行 search_tokens，再根据匹配结果和 model_name 从全局数据节点集合中生成 KvBlockPos 列表
+    /// 对 block_infos 执行索引查询，再根据匹配结果和 model_name 从全局数据节点集合中生成 KvBlockPos 列表
     fn match_results_to_block_pos(
         shared: &Shared,
         block_infos: &[BlockHashInfo],
