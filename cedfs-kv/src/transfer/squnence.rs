@@ -49,7 +49,6 @@ impl ActiveSequences {
         self.unique_blocks.insert(*block, Arc::downgrade(&rc));
         rc
     }
-    
 
     fn try_remove_block(&self, block: &[u8; 32]) {
         if let Some(weak) = self.unique_blocks.get(block) {
@@ -152,7 +151,7 @@ impl ActiveSequences {
             None => {
                 tracing::warn!("Trying to free non-existent request {request_id}");
                 return self.active_blocks();
-            }
+            },
         };
 
         // Drop each Rc reference, then clean up the corresponding weak reference

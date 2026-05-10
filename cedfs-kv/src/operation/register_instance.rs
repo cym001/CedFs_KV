@@ -1,7 +1,7 @@
 use anyhow::Ok;
 
-use crate::Shared;
 use crate::types::DataServer;
+use crate::Shared;
 
 pub struct RegisterInstanceOp {
     pub data_server: DataServer,
@@ -9,10 +9,10 @@ pub struct RegisterInstanceOp {
 }
 
 impl RegisterInstanceOp {
-    pub async fn run(&self) -> anyhow::Result<()>{
+    pub async fn run(&self) -> anyhow::Result<()> {
         let data_server_id = self.data_server.id;
         let meta_server_id = self.shared.config.local_meta_server.id;
-        
+
         // 1. 将data_server插入本地数据服务器集合中
         {
             let mut local_data_servers = self.shared.local_data_server_collect.write().await;
@@ -30,7 +30,7 @@ impl RegisterInstanceOp {
                 );
             }
         }
-        
+
         // 2. 将data_server插入全局数据服务器集合中（按meta_server_id分组）
         {
             self.shared.global_data_server_collect
@@ -61,10 +61,11 @@ impl RegisterInstanceOp {
                     vec![self.data_server.clone()]
                 });
         }
-        
+
         // 3. 建立data_server到meta_server的映射
         {
-            self.shared.data_server_to_meta_server
+            self.shared
+                .data_server_to_meta_server
                 .insert(data_server_id, meta_server_id);
             tracing::info!(
                 "Mapped data_server {} to meta_server {} in data_server_to_meta_server",
@@ -72,7 +73,7 @@ impl RegisterInstanceOp {
                 meta_server_id
             );
         }
-        
+
         tracing::info!(
             "Successfully registered data_server {} (model: {}) under meta_server {}",
             data_server_id,
@@ -80,7 +81,6 @@ impl RegisterInstanceOp {
             meta_server_id
         );
 
-        
         Ok(())
     }
 }

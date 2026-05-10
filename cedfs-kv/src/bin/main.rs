@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
             fmt::layer()
                 // 默认会包含时间戳
                 .with_level(true)
-                .with_target(false)
+                .with_target(false),
         )
         .with(filter)
         .init();
@@ -59,7 +59,5 @@ async fn main() -> anyhow::Result<()> {
     // );
     kvserver.serve().await;
 
-
-    
     Ok(())
 }

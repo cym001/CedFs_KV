@@ -46,7 +46,10 @@ impl RequestEndOp {
             return Ok(());
         }
 
-        let Some(source_server) = self.resolve_source_server(pending_task.source_server_id).await else {
+        let Some(source_server) = self
+            .resolve_source_server(pending_task.source_server_id)
+            .await
+        else {
             tracing::warn!(
                 "RequestEndOp: source server {} not found, skip pending migration for request {}",
                 pending_task.source_server_id,
@@ -81,14 +84,14 @@ impl RequestEndOp {
                         request_id,
                         migration_result
                     );
-                }
+                },
                 Err(e) => {
                     tracing::warn!(
                         "RequestEndOp: request_id={} async migration failed: {:?}",
                         request_id,
                         e
                     );
-                }
+                },
             }
         });
 

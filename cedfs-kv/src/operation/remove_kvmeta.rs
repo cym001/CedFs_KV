@@ -1,5 +1,4 @@
 use anyhow::Ok;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Shared;
 
@@ -42,15 +41,17 @@ impl RemoveKvMetaOp {
 
         // 遍历每个 token_hash 进行删除操作
         for token_hash in token_hashes.iter() {
-            // 2. 从 KV 元数据索引中移除当前服务器副本
-            let before = self.shared.kv_meta_index.replica_count(*token_hash);
-            let removed = self
+            // 从 KV 元数据树中移除当前服务器副本，并扣减该副本分摊的热度。
+            let Some(report) = self
                 .shared
-                .kv_meta_index
-                .remove_server(*token_hash, self.server_id);
-            if removed && before <= 1 {
+                .kv_radix
+                .apply_eviction(self.server_id, *token_hash)
+            else {
+                continue;
+            };
+            if report.removed && report.replica_count_before <= 1 {
                 tracing::debug!(
-                    "RemoveKvMetaOp: Completely removed token_hash {:?} from kv_meta_index",
+                    "RemoveKvMetaOp: Completely removed token_hash {:?} from kv_radix",
                     token_hash
                 );
             }

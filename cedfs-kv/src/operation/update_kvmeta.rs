@@ -3,10 +3,10 @@
 // use anyhow::Ok;
 
 // use crate::Shared;
-// use crate::types::{KvBlockMeta, UpdateKvOp};
+// use crate::types::UpdateKvOp;
 
 // pub struct UpdateKvMetaOp {
-//     pub kv_meta: Vec<KvBlockMeta>,
+//     pub kv_meta: Vec<[u8; 32]>,
 //     pub kv_ref: HashMap<[u8; 32], u64>,
 //     pub update_op: Vec<UpdateKvOp>,
 //     pub shared: Shared,

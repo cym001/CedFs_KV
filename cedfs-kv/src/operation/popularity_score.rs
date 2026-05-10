@@ -146,7 +146,7 @@
     
 //     /// 根据token_hash获取对应的源DataServer、offset和目标DataServer
 //     /// 返回: Vec<(token_hash, offset, source_server, target_server)>
-//     /// 其中target_server必须是local_data_server_collect中不在KvBlockMeta的server_id中的dataserver
+//     /// 其中 target_server 必须是不持有对应 KV block 副本的本地 dataserver
 //     /// source_server必须是global_data_server_collect中不在local_data_server_collect中的server
 //     pub async fn get_instance_from_token_hash(&self, ids: Vec<[u8; 32]>) -> Vec<([u8; 32], u32, DataServer, DataServer)> {
         

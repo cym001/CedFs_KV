@@ -47,7 +47,7 @@ impl NewRequestOp {
         let token_hashes: Vec<[u8; 32]> = block_infos.iter().map(|info| info.seq_hash).collect();
 
         for info in &block_infos {
-            self.shared.kv_meta_index.increment_ref_count(info.seq_hash);
+            self.shared.kv_radix.increment_heat(info.seq_hash);
         }
 
         // tracing::info!(

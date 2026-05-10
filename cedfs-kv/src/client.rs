@@ -4,7 +4,7 @@
 // use cedfs_proto::kvcache::{
 //     GetKvMetaRequest, GetKvMetaResponse, UpdateKvMetaRequest, UpdateKvMetaResponse,
 // };
-// use cedfs_proto::kvcache::{KvBlockMeta as ProtoKvBlockMeta, LocalBlockCount};
+// use cedfs_proto::kvcache::LocalBlockCount;
 
 // use crate::convert::{bytes2hash, hash2bytes};
 // use crate::operation::move_kvreplica::MoveKVReplicaOp;
@@ -247,7 +247,7 @@
 
 //         // 克隆数据并清空原有数据
 //         let update_meta = {
-//             let meta_snapshot: Vec<ProtoKvBlockMeta> = shared
+//             let meta_snapshot = shared
 //                 .update_kvmeta_table
 //                 .iter()
 //                 .map(|entry| entry.value().clone().into())

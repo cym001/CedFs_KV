@@ -1,29 +1,23 @@
 use tonic::{Request, Response, Status};
 
-use cedfs_proto::kvcache::kv_meta2_data_server::{KvMeta2Data};
-use cedfs_proto::kvcache::{
-    UploadKvMetaRequest, UploadKvMetaResponse,
-    RegisterInstanceRequest, RegisterInstanceResponse,
-    RemoveKvMetaRequest, RemoveKvMetaResponse,
-    NewRequestRequest, NewRequestResponse,
-    RequestEndRequest, RequestEndResponse,
+use crate::operation::{
+    new_request::NewRequestOp, remove_kvmeta::RemoveKvMetaOp, request_end::RequestEndOp,
+    upload_kvmeta::UploadKvMetaOp,
 };
 use crate::Shared;
-use crate::operation::{
-    upload_kvmeta::UploadKvMetaOp,
-    remove_kvmeta::RemoveKvMetaOp,
-    new_request::NewRequestOp,
-    request_end::RequestEndOp,
+use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2Data;
+use cedfs_proto::kvcache::{
+    NewRequestRequest, NewRequestResponse, RegisterInstanceRequest, RegisterInstanceResponse,
+    RemoveKvMetaRequest, RemoveKvMetaResponse, RequestEndRequest, RequestEndResponse,
+    UploadKvMetaRequest, UploadKvMetaResponse,
 };
-
 
 pub struct KvCacheDataService {
     pub(crate) shared: Shared,
 }
 
-
 #[tonic::async_trait]
-impl KvMeta2Data for KvCacheDataService{
+impl KvMeta2Data for KvCacheDataService {
     /// 上传KV元数据
     async fn upload_kv_meta(
         &self,
@@ -35,26 +29,29 @@ impl KvMeta2Data for KvCacheDataService{
             server_id: req.server_id,
             tokens: req.tokens,
             shared: self.shared.clone(),
-        }.run().await;
+        }
+        .run()
+        .await;
         match resp {
-            Ok(_) => Ok(Response::new(UploadKvMetaResponse {success: true,})),
+            Ok(_) => Ok(Response::new(UploadKvMetaResponse { success: true })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 
     /// 注册推理实例信息
-    async fn register_instance(&self,
+    async fn register_instance(
+        &self,
         request: Request<RegisterInstanceRequest>,
-    ) -> Result<Response<RegisterInstanceResponse>, Status>{
+    ) -> Result<Response<RegisterInstanceResponse>, Status> {
         tracing::debug!("register_instance request received");
         let _req = request.into_inner();
-        let _op = crate::operation::register_instance::RegisterInstanceOp{
+        let _op = crate::operation::register_instance::RegisterInstanceOp {
             data_server: _req.data_server.unwrap().into(),
             shared: self.shared.clone(),
         };
         let resp = _op.run().await;
         match resp {
-            Ok(_) => Ok(Response::new(RegisterInstanceResponse {success: true,})),
+            Ok(_) => Ok(Response::new(RegisterInstanceResponse { success: true })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -71,9 +68,11 @@ impl KvMeta2Data for KvCacheDataService{
             remove_nums: req.remove_nums,
             tokens_hash: req.tokens_hash,
             shared: self.shared.clone(),
-        }.run().await;
+        }
+        .run()
+        .await;
         match resp {
-            Ok(_) => Ok(Response::new(RemoveKvMetaResponse {success: true,})),
+            Ok(_) => Ok(Response::new(RemoveKvMetaResponse { success: true })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
@@ -113,5 +112,4 @@ impl KvMeta2Data for KvCacheDataService{
             Err(e) => Err(Status::internal(e.to_string())),
         }
     }
-
 }

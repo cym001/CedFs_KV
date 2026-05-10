@@ -12,12 +12,13 @@ use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 
 use crate::config::Config;
 use crate::hash::{HashAlgorithm, TokenHasher};
+use crate::kv_radix::KvRadixTree;
 use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::operation::transfer_kv::TransferKvOp;
 use crate::tokenizers::TokenizerManager;
 use crate::transfer::squnence::ActiveSequences;
-use crate::types::{BlockHashInfo, DataServer, KvMetaIndex, MetaServer};
+use crate::types::{BlockHashInfo, DataServer, MetaServer};
 
 pub mod config;
 pub mod types;
@@ -25,6 +26,7 @@ pub mod types;
 //pub mod client;
 pub mod convert;
 pub mod hash;
+pub mod kv_radix;
 pub mod network;
 pub mod operation;
 pub mod tokenizers;
@@ -78,14 +80,11 @@ pub struct Shared {
     // hash生成器
     pub hasher: Arc<TokenHasher>,
 
-    // 本地kv块元数据
-    //pub local_kvcache_table: Arc<DashMap<[u8; 32], KvBlockMeta>>,
-
     // 分词器
     pub tokenizer_manager: Arc<TokenizerManager>,
 
     // 全局 KV 元数据索引
-    pub kv_meta_index: Arc<KvMetaIndex>,
+    pub kv_radix: Arc<KvRadixTree>,
 
     // 节点配置
     pub config: Arc<Config>,
@@ -184,7 +183,7 @@ impl KVServer {
                     data_server_to_meta_server: Arc::new(DashMap::new()),
                     hasher: Arc::new(hasher),
                     tokenizer_manager,
-                    kv_meta_index: Arc::new(KvMetaIndex::new()),
+                    kv_radix: Arc::new(KvRadixTree::new()),
                     config: Arc::new(config),
                     recent_migrations: Arc::new(DashMap::new()),
                     active_squence,
@@ -267,18 +266,17 @@ impl Shared {
         s
     }
 
-
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
     ///
     /// # 参数
     /// - `token_hash`: 块的哈希值
     /// - `server_id`: 要移除的服务器ID
     pub fn remove_server_from_kv_meta(&self, token_hash: [u8; 32], server_id: u32) {
-        let before = self.kv_meta_index.replica_count(token_hash);
-        let removed = self.kv_meta_index.remove_server(token_hash, server_id);
+        let before = self.kv_radix.replica_count(token_hash);
+        let removed = self.kv_radix.remove_server(token_hash, server_id);
         if removed && before <= 1 {
             tracing::info!(
-                "Removed KV block {:?} from kv_meta_index as it has no replicas",
+                "Removed KV block {:?} from kv_radix as it has no replicas",
                 token_hash
             );
         }
@@ -291,7 +289,7 @@ impl Shared {
     }
 
     pub fn search_tokens_by_infos(&self, blocks: &[BlockHashInfo]) -> Vec<(u32, u32)> {
-        self.kv_meta_index.find_matches(blocks)
+        self.kv_radix.find_matches(blocks)
     }
 
     /// 创建新的 KV 块。
@@ -304,7 +302,7 @@ impl Shared {
             return None;
         }
 
-        let store_results = self.kv_meta_index.store_blocks(server_id, &blocks);
+        let store_results = self.kv_radix.store_blocks(server_id, &blocks);
         let mut replica_counts = Vec::with_capacity(store_results.len());
 
         for result in store_results {
@@ -320,8 +318,8 @@ impl Shared {
     ) -> Option<([u8; 32], u32, DataServer, DataServer)> {
         let local_data_servers = self.local_data_server_collect.read().await;
 
-        let snapshot = self.kv_meta_index.get_block(*token_hash)?;
-        let offset = snapshot.meta.offset;
+        let snapshot = self.kv_radix.block_snapshot(*token_hash)?;
+        let offset = snapshot.offset;
 
         let source = local_data_servers
             .iter()
@@ -422,10 +420,10 @@ impl Shared {
         // 2) 先解析可迁移元数据（hash -> offset + replica_count + concurrency）
         let mut known_hash_with_state: Vec<([u8; 32], u32, u64, u64)> = Vec::new();
         for (token_hash, concurrency) in hash_seq_with_concurrency {
-            if let Some(snapshot) = self.kv_meta_index.get_block(*token_hash) {
+            if let Some(snapshot) = self.kv_radix.block_snapshot(*token_hash) {
                 known_hash_with_state.push((
                     *token_hash,
-                    snapshot.meta.offset,
+                    snapshot.offset,
                     *concurrency,
                     snapshot.servers.len() as u64,
                 ));
@@ -468,7 +466,7 @@ impl Shared {
             let target = &candidate_targets[idx];
             let mut first_miss_at: Option<usize> = None;
             for (i, (token_hash, _, _)) in gated_hashes.iter().enumerate() {
-                let exists_on_target = self.kv_meta_index.contains_server(*token_hash, target.id);
+                let exists_on_target = self.kv_radix.contains_server(*token_hash, target.id);
                 if !exists_on_target {
                     first_miss_at = Some(i);
                     break;
@@ -564,7 +562,7 @@ impl Shared {
 
     /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
     async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
-        self.kv_meta_index.add_server(token_hash, new_server_id);
+        self.kv_radix.add_server(token_hash, new_server_id);
     }
 
     /// 若 concurrent_count > replica_count*2 时，可调用此方法：对单个 token_hash 尝试域内迁移并执行

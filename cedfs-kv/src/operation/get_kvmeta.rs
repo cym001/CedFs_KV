@@ -2,7 +2,7 @@
 // use cedfs_proto::kvcache::LocalBlockCount as ProtoLocalBlockCount;
 
 // use crate::Shared;
-// use crate::types::{KvBlockMeta, DataServer, MetaServer};
+// use crate::types::{DataServer, MetaServer};
 // use crate::convert::{hash2bytes};
 
 
@@ -82,7 +82,7 @@
         
 //         // 1. 收集本地 KV 块元数据
 //         let indexs = self.shared.local_kv_index.read().await.clone();
-//         let meta: Vec<KvBlockMeta> = indexs
+//         let meta = indexs
 //             .iter()
 //             .filter_map(|token_hash| {
 //                 self.shared.global_kvcache_table.get(token_hash).map(|entry| entry.value().clone())

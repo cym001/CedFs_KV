@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TransferRequest {
-    hashes: Vec<[u8;32]>,
+    hashes: Vec<[u8; 32]>,
     old_position: (String, String),
     offsets: Vec<i64>,
     peer_ip: String,
@@ -33,7 +33,7 @@ impl MoveKVReplicaOp {
     // 发送 transfer 请求
     pub async fn send_transfer_request(
         &self,
-        hashes: Vec<[u8;32]>,
+        hashes: Vec<[u8; 32]>,
         old_position: (String, String),
         offsets: Vec<i64>,
         peer_ip: String,
@@ -50,8 +50,9 @@ impl MoveKVReplicaOp {
         };
 
         let url = format!("{}/Transfer", self.base_url);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&request_body)
