@@ -56,6 +56,12 @@ pub struct Config {
 
     // 是否迁移KV Cache
     pub transfer_strategy: bool,
+
+    // 触发压力迁移的最大/最小实例压力差阈值比例
+    pub migration_beta: f64,
+
+    // 压力迁移停止时允许的源/目标实例压力差阈值比例
+    pub migration_delta: f64,
 }
 
 impl Config {
@@ -129,6 +135,29 @@ impl Config {
             .get("transfer_strategy")
             .map_err(|e| ConfigError::MissingField(format!("transfer_strategy: {}", e)))?;
 
+        let migration_beta: f64 = config
+            .get("migration_beta")
+            .map_err(|e| ConfigError::MissingField(format!("migration_beta: {}", e)))?;
+        let migration_delta: f64 = config
+            .get("migration_delta")
+            .map_err(|e| ConfigError::MissingField(format!("migration_delta: {}", e)))?;
+
+        if migration_beta <= 0.0 {
+            return Err(ConfigError::BuildError(
+                "migration_beta must be greater than 0".to_string(),
+            ));
+        }
+        if migration_delta <= 0.0 {
+            return Err(ConfigError::BuildError(
+                "migration_delta must be greater than 0".to_string(),
+            ));
+        }
+        if migration_delta >= migration_beta {
+            return Err(ConfigError::BuildError(
+                "migration_delta must be less than migration_beta".to_string(),
+            ));
+        }
+
         Ok(ConfigBuilder::default()
             .loaded_config(config)
             .local_meta_server(local_meta_server)
@@ -147,6 +176,8 @@ impl Config {
             .model_tokenizer_map(model_tokenizer_map)
             .scheduler_strategy(scheduler_strategy)
             .transfer_strategy(transfer_strategy)
+            .migration_beta(migration_beta)
+            .migration_delta(migration_delta)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

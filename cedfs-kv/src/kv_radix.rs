@@ -396,14 +396,8 @@ impl KvRadixTree {
         &self,
         src_server: ServerId,
         dst_server: ServerId,
-        delta: f64,
+        _delta: f64,
     ) -> Vec<MigrationCandidate> {
-        let src_pressure = self.instance_pressure(src_server);
-        let dst_pressure = self.instance_pressure(dst_server);
-        let stats = self.pressure_stats();
-        let target_gap = delta * stats.avg_pressure;
-        let mut projected_src = src_pressure;
-        let mut projected_dst = dst_pressure;
         let mut candidates = self.replication_candidate_pool(src_server, dst_server);
 
         candidates.sort_by(|left, right| {
@@ -416,25 +410,43 @@ impl KvRadixTree {
         });
         candidates = Self::prefer_contiguous_candidates(candidates);
 
+        let Some(start) = candidates.iter().position(|candidate| {
+            candidate.pressure_drop > 0.0
+                && candidate
+                    .parent_seq_hash
+                    .map(|parent_hash| self.contains_server(parent_hash, dst_server))
+                    .unwrap_or(true)
+        }) else {
+            return Vec::new();
+        };
+
         let mut selected = Vec::new();
-        for candidate in candidates {
-            if candidate.pressure_drop <= 0.0 {
-                continue;
-            }
+        let mut current_hash = candidates[start].seq_hash;
+        let first = candidates.remove(start);
+        selected.push(MigrationCandidate {
+            seq_hash: first.seq_hash,
+            src_server,
+            dst_server,
+            projected_pressure_drop: first.pressure_drop,
+            projected_target_increase: first.target_increase,
+        });
 
-            selected.push(MigrationCandidate {
-                seq_hash: candidate.seq_hash,
-                src_server,
-                dst_server,
-                projected_pressure_drop: candidate.pressure_drop,
-                projected_target_increase: candidate.target_increase,
-            });
-            projected_src -= candidate.pressure_drop;
-            projected_dst += candidate.target_increase;
-
-            if (projected_src - projected_dst).abs() <= target_gap {
+        while let Some(next_idx) = candidates
+            .iter()
+            .position(|candidate| candidate.parent_seq_hash == Some(current_hash))
+        {
+            let next = candidates.remove(next_idx);
+            if next.pressure_drop <= 0.0 {
                 break;
             }
+            current_hash = next.seq_hash;
+            selected.push(MigrationCandidate {
+                seq_hash: next.seq_hash,
+                src_server,
+                dst_server,
+                projected_pressure_drop: next.pressure_drop,
+                projected_target_increase: next.target_increase,
+            });
         }
 
         selected
@@ -639,11 +651,7 @@ impl KvRadixTree {
 
                 let parent_seq_hash = block.parent.upgrade().and_then(|parent| {
                     let parent_read = parent.read().expect("radix block poisoned");
-                    let parent_seq_hash = parent_read.seq_hash;
-                    if parent_seq_hash.is_some() && !parent_read.servers.contains(&dst_server) {
-                        return None;
-                    }
-                    Some(parent_seq_hash)
+                    Some(parent_read.seq_hash)
                 })?;
 
                 let heat = block.heat as f64;
@@ -844,8 +852,30 @@ mod tests {
 
         let candidates = index.select_replication_candidates(1, 2, 0.1);
         assert_eq!(candidates[0].seq_hash, blocks[1].seq_hash);
+        assert_eq!(candidates[1].seq_hash, blocks[2].seq_hash);
         assert!(candidates.iter().all(|candidate| candidate.src_server == 1));
         assert!(candidates.iter().all(|candidate| candidate.dst_server == 2));
+    }
+
+    #[test]
+    fn select_replication_returns_complete_contiguous_sequence() {
+        let index = KvRadixTree::new();
+        let blocks = vec![info(0, 10, 20, 4), info(1, 11, 21, 4), info(2, 12, 22, 4)];
+        index.store_blocks(1, &blocks);
+        index.store_blocks(2, &blocks[..1]);
+        for _ in 0..8 {
+            index.increment_heat(blocks[1].seq_hash);
+        }
+        for _ in 0..8 {
+            index.increment_heat(blocks[2].seq_hash);
+        }
+
+        let candidates = index.select_replication_candidates(1, 2, 10.0);
+        let selected_hashes: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.seq_hash)
+            .collect();
+        assert_eq!(selected_hashes, vec![blocks[1].seq_hash, blocks[2].seq_hash]);
     }
 
     #[test]
