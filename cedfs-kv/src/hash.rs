@@ -391,6 +391,7 @@ impl TokenHasher {
                 local_hash,
                 seq_hash: current_hash.to_u256(),
                 offset,
+                tokens: chunk.to_vec(),
             });
         }
 
@@ -479,6 +480,9 @@ mod tests {
         assert_eq!(results[0].position, 0);
         assert_eq!(results[1].position, 1);
         assert_eq!(results[2].position, 2);
+        assert_eq!(results[0].tokens, vec![1, 2]);
+        assert_eq!(results[1].tokens, vec![3, 4]);
+        assert_eq!(results[2].tokens, vec![5, 6]);
     }
 
     #[test]

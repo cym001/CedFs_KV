@@ -5,12 +5,13 @@ use std::net::{IpAddr, Ipv4Addr};
 pub type BlockHash = [u8; 32];
 pub type ServerId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BlockHashInfo {
     pub position: usize,
     pub local_hash: BlockHash,
     pub seq_hash: BlockHash,
     pub offset: u32,
+    pub tokens: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

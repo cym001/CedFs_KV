@@ -256,9 +256,9 @@ impl Shared {
                 return Ok(result);
             }
 
-            let candidates = self
-                .kv_radix
-                .select_replication_candidates(src_server_id, dst_server_id, delta);
+            let candidates =
+                self.kv_radix
+                    .select_replication_candidates(src_server_id, dst_server_id, delta);
             if candidates.is_empty() {
                 result.skipped_reason = Some("no_replication_candidates".to_string());
                 return Ok(result);
@@ -279,10 +279,12 @@ impl Shared {
 
             let mut hashes = Vec::with_capacity(candidates.len());
             let mut offsets = Vec::with_capacity(candidates.len());
+            let mut token_ids = Vec::new();
             for candidate in candidates {
                 if let Some(snapshot) = self.kv_radix.block_snapshot(candidate.seq_hash) {
                     hashes.push(candidate.seq_hash);
                     offsets.push(snapshot.offset);
+                    token_ids.extend(snapshot.tokens);
                 }
             }
 
@@ -293,7 +295,7 @@ impl Shared {
 
             let migrated_count = hashes.len();
             match self
-                .transfer_pressure_candidates(&src_server, &dst_server, &hashes, offsets)
+                .transfer_pressure_candidates(&src_server, &dst_server, &hashes, offsets, token_ids)
                 .await
             {
                 Ok(status) if status > 0 => {
@@ -342,6 +344,7 @@ impl Shared {
         dst_server: &DataServer,
         hashes: &[[u8; 32]],
         offsets: Vec<u32>,
+        token_ids: Vec<u32>,
     ) -> anyhow::Result<i32> {
         let url = format!("http://{}:{}", src_server.ip, src_server.rpc_port);
         let client = TransferKvOp::new(&url);
@@ -356,7 +359,7 @@ impl Shared {
                 concatenated_hash_bytes,
                 position,
                 offsets,
-                vec![],
+                token_ids,
                 dst_server.ip.to_string(),
                 dst_server.init_port as i32,
                 true,

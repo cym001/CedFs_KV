@@ -16,6 +16,7 @@ pub struct RadixBlock {
     local_hash: Option<BlockHash>,
     position: usize,
     offset: u32,
+    tokens: Vec<u32>,
     servers: HashSet<ServerId>,
     heat: u64,
     last_access: Option<Instant>,
@@ -30,6 +31,7 @@ impl RadixBlock {
             local_hash: None,
             position: 0,
             offset: 0,
+            tokens: Vec::new(),
             servers: HashSet::new(),
             heat: 0,
             last_access: None,
@@ -44,13 +46,14 @@ impl RadixBlock {
             local_hash: Some(info.local_hash),
             position: info.position,
             offset: info.offset,
+            tokens: info.tokens,
             servers: HashSet::new(),
             heat: 0,
             last_access: None,
         }
     }
 
-    fn covers_info(&self, info: BlockHashInfo) -> bool {
+    fn covers_info(&self, info: &BlockHashInfo) -> bool {
         self.seq_hash == Some(info.seq_hash)
             && self.local_hash == Some(info.local_hash)
             && self.position == info.position
@@ -63,6 +66,7 @@ pub struct BlockSnapshot {
     pub local_hash: BlockHash,
     pub position: usize,
     pub offset: u32,
+    pub tokens: Vec<u32>,
     pub servers: Vec<ServerId>,
     pub heat: u64,
     pub parent_seq_hash: Option<BlockHash>,
@@ -153,7 +157,8 @@ impl KvRadixTree {
                 .unwrap_or_else(|| self.root.clone())
         };
 
-        for info in blocks.iter().copied().skip(matched_len) {
+        for info in blocks.iter().skip(matched_len).cloned() {
+            let seq_hash = info.seq_hash;
             let child = self.child_or_insert(&current, info);
             let (server_added, replica_count) = {
                 let mut node = child.write().expect("radix block poisoned");
@@ -161,10 +166,10 @@ impl KvRadixTree {
                 (server_added, node.servers.len() as u32)
             };
 
-            self.block_index.insert(info.seq_hash, child.clone());
-            self.insert_server_lookup(server_id, info.seq_hash, child.clone());
+            self.block_index.insert(seq_hash, child.clone());
+            self.insert_server_lookup(server_id, seq_hash, child.clone());
             reports.push(StoreReport {
-                seq_hash: info.seq_hash,
+                seq_hash,
                 replica_count,
                 server_added,
             });
@@ -238,6 +243,7 @@ impl KvRadixTree {
             local_hash: block.local_hash?,
             position: block.position,
             offset: block.offset,
+            tokens: block.tokens.clone(),
             servers: block.servers.iter().copied().collect(),
             heat: block.heat,
             parent_seq_hash,
@@ -270,7 +276,7 @@ impl KvRadixTree {
         let mut active_servers: Option<HashSet<ServerId>> = None;
         let mut matched_offsets: HashMap<ServerId, u32> = HashMap::new();
 
-        for info in blocks.iter().copied() {
+        for info in blocks.iter() {
             let Some(child) = Self::child_for_local(&current, info.local_hash) else {
                 break;
             };
@@ -320,7 +326,7 @@ impl KvRadixTree {
                 break;
             };
             let block = node.read().expect("radix block poisoned");
-            if !block.covers_info(*info) || !block.servers.contains(&server_id) {
+            if !block.covers_info(info) || !block.servers.contains(&server_id) {
                 break;
             }
             matched += 1;
@@ -719,11 +725,13 @@ mod tests {
     }
 
     fn info(position: usize, local: u8, seq: u8, offset: u32) -> BlockHashInfo {
+        let start = position as u32 * offset;
         BlockHashInfo {
             position,
             local_hash: hash(local),
             seq_hash: hash(seq),
             offset,
+            tokens: (start..start + offset).collect(),
         }
     }
 
@@ -750,6 +758,8 @@ mod tests {
         assert_eq!(second.parent_seq_hash, Some(blocks[0].seq_hash));
         assert_eq!(second.position, 1);
         assert_eq!(second.offset, 4);
+        assert_eq!(first.tokens, blocks[0].tokens);
+        assert_eq!(second.tokens, blocks[1].tokens);
     }
 
     #[test]
@@ -875,7 +885,10 @@ mod tests {
             .iter()
             .map(|candidate| candidate.seq_hash)
             .collect();
-        assert_eq!(selected_hashes, vec![blocks[1].seq_hash, blocks[2].seq_hash]);
+        assert_eq!(
+            selected_hashes,
+            vec![blocks[1].seq_hash, blocks[2].seq_hash]
+        );
     }
 
     #[test]
@@ -893,8 +906,8 @@ mod tests {
     fn apply_eviction_subtracts_shared_heat() {
         let index = KvRadixTree::new();
         let block = info(0, 10, 20, 4);
-        index.store_blocks(1, &[block]);
-        index.store_blocks(2, &[block]);
+        index.store_blocks(1, std::slice::from_ref(&block));
+        index.store_blocks(2, std::slice::from_ref(&block));
         for _ in 0..6 {
             index.increment_heat(block.seq_hash);
         }
