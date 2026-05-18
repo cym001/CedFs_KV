@@ -80,6 +80,14 @@ pub struct StoreReport {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct InstanceMetricsSnapshot {
+    pub server_id: ServerId,
+    pub total_heat: u64,
+    pub kv_block_count: usize,
+    pub total_replica_count: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct PressureStats {
     pub max_server: Option<ServerId>,
     pub max_pressure: f64,
@@ -137,6 +145,33 @@ impl KvRadixTree {
             lookup: DashMap::new(),
             block_index: DashMap::new(),
         }
+    }
+
+    pub fn instance_metrics_snapshots(&self) -> Vec<InstanceMetricsSnapshot> {
+        let mut snapshots = Vec::new();
+
+        for entry in self.lookup.iter() {
+            let server_id = *entry.key();
+            let server_map = entry.value().read().expect("server lookup poisoned");
+            let mut snapshot = InstanceMetricsSnapshot {
+                server_id,
+                kv_block_count: server_map.len(),
+                ..Default::default()
+            };
+
+            for node in server_map.values() {
+                let block = node.read().expect("radix block poisoned");
+                snapshot.total_heat = snapshot.total_heat.saturating_add(block.heat);
+                snapshot.total_replica_count = snapshot
+                    .total_replica_count
+                    .saturating_add(block.servers.len() as u64);
+            }
+
+            snapshots.push(snapshot);
+        }
+
+        snapshots.sort_by_key(|snapshot| snapshot.server_id);
+        snapshots
     }
 
     pub fn store_blocks(&self, server_id: ServerId, blocks: &[BlockHashInfo]) -> Vec<StoreReport> {

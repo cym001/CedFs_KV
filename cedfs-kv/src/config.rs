@@ -62,6 +62,12 @@ pub struct Config {
 
     // 压力迁移停止时允许的源/目标实例压力差阈值比例
     pub migration_delta: f64,
+
+    // 是否开启 metrics 定时统计
+    pub enable_metrics: bool,
+
+    // metrics 定时统计间隔，单位秒
+    pub metrics_time: u64,
 }
 
 impl Config {
@@ -141,6 +147,12 @@ impl Config {
         let migration_delta: f64 = config
             .get("migration_delta")
             .map_err(|e| ConfigError::MissingField(format!("migration_delta: {}", e)))?;
+        let enable_metrics: bool = config
+            .get("enable_metrics")
+            .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
+        let metrics_time: u64 = config
+            .get("metrics_time")
+            .map_err(|e| ConfigError::MissingField(format!("metrics_time: {}", e)))?;
 
         if migration_beta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -155,6 +167,11 @@ impl Config {
         if migration_delta >= migration_beta {
             return Err(ConfigError::BuildError(
                 "migration_delta must be less than migration_beta".to_string(),
+            ));
+        }
+        if enable_metrics && metrics_time == 0 {
+            return Err(ConfigError::BuildError(
+                "metrics_time must be greater than 0 when enable_metrics is true".to_string(),
             ));
         }
 
@@ -178,6 +195,8 @@ impl Config {
             .transfer_strategy(transfer_strategy)
             .migration_beta(migration_beta)
             .migration_delta(migration_delta)
+            .enable_metrics(enable_metrics)
+            .metrics_time(metrics_time)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

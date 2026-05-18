@@ -1,6 +1,7 @@
 use dashmap::{DashMap, DashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -177,6 +178,7 @@ impl KVServer {
 
         // start rpc server
         info!("start kvcache server on: {}", format!("{}:{}", ip, port));
+        self.shared.launch_metrics_reporter();
 
         let meta_server = KvMeta2MetaServer::new(KvCacheMetaService {
             shared: self.shared.clone(),
@@ -195,6 +197,39 @@ impl KVServer {
 }
 
 impl Shared {
+    pub fn launch_metrics_reporter(&self) {
+        if !self.config.enable_metrics {
+            return;
+        }
+
+        let metrics_time = self.config.metrics_time;
+        let kv_radix = self.kv_radix.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(metrics_time));
+
+            loop {
+                interval.tick().await;
+                let snapshots = kv_radix.instance_metrics_snapshots();
+
+                if snapshots.is_empty() {
+                    tracing::info!("kv metrics: no registered kv blocks");
+                    continue;
+                }
+
+                for snapshot in snapshots {
+                    tracing::info!(
+                        "kv metrics: server_id={}, total_heat={}, kv_block_count={}, total_replica_count={}",
+                        snapshot.server_id,
+                        snapshot.total_heat,
+                        snapshot.kv_block_count,
+                        snapshot.total_replica_count
+                    );
+                }
+            }
+        });
+    }
+
     /// 从 KV 元数据中移除指定的 server_id（当 KV cache 不存在时调用）
     ///
     /// # 参数
