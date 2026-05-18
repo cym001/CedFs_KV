@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,7 +12,9 @@ use crate::hash::{HashAlgorithm, TokenHasher};
 use crate::kv_radix::KvRadixTree;
 use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
-use crate::operation::transfer_kv::TransferKvOp;
+use crate::operation::transfer_kv::{
+    TransferKvOp, KV_TRANSFER_ALREADY_SATISFIED, KV_TRANSFER_FAILED, KV_TRANSFER_NOT_FOUND,
+};
 use crate::tokenizers::TokenizerManager;
 use crate::transfer::squnence::ActiveSequences;
 use crate::types::{BlockHashInfo, DataServer, MetaServer};
@@ -59,6 +61,8 @@ pub struct Shared {
 
     //活跃请求序列
     pub active_squence: Arc<ActiveSequences>,
+
+    pub pressure_migration_in_flight: Arc<DashSet<(u32, u32)>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +79,17 @@ pub struct PressureMigrationResult {
 
 pub struct KVServer {
     pub shared: Shared,
+}
+
+struct PressureMigrationGuard {
+    in_flight: Arc<DashSet<(u32, u32)>>,
+    pair: (u32, u32),
+}
+
+impl Drop for PressureMigrationGuard {
+    fn drop(&mut self) {
+        self.in_flight.remove(&self.pair);
+    }
 }
 
 //todo() 只需要为推理节点添加路由，后续修改
@@ -144,6 +159,7 @@ impl KVServer {
                     kv_radix: Arc::new(KvRadixTree::new()),
                     config: Arc::new(config),
                     active_squence,
+                    pressure_migration_in_flight: Arc::new(DashSet::new()),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -256,6 +272,21 @@ impl Shared {
                 return Ok(result);
             }
 
+            let migration_pair = (src_server_id, dst_server_id);
+            if !self.pressure_migration_in_flight.insert(migration_pair) {
+                result.skipped_reason = Some("migration_pair_in_flight".to_string());
+                tracing::info!(
+                    "pressure migration skipped because pair is already in-flight: source_server={}, target_server={}",
+                    src_server_id,
+                    dst_server_id
+                );
+                return Ok(result);
+            }
+            let _migration_guard = PressureMigrationGuard {
+                in_flight: self.pressure_migration_in_flight.clone(),
+                pair: migration_pair,
+            };
+
             let candidates =
                 self.kv_radix
                     .select_replication_candidates(src_server_id, dst_server_id, delta);
@@ -298,6 +329,20 @@ impl Shared {
                 .transfer_pressure_candidates(&src_server, &dst_server, &hashes, offsets, token_ids)
                 .await
             {
+                Ok(KV_TRANSFER_ALREADY_SATISFIED) => {
+                    tracing::info!(
+                        "pressure migration already satisfied: source_server={}, target_server={}, batch_size={}, status={}",
+                        src_server.id,
+                        dst_server.id,
+                        migrated_count,
+                        KV_TRANSFER_ALREADY_SATISFIED
+                    );
+                    for token_hash in hashes {
+                        self.update_kv_meta_after_migration(token_hash, dst_server.id)
+                            .await;
+                    }
+                    result.success_count += migrated_count;
+                },
                 Ok(status) if status > 0 => {
                     for token_hash in hashes {
                         self.update_kv_meta_after_migration(token_hash, dst_server.id)
@@ -305,17 +350,28 @@ impl Shared {
                     }
                     result.success_count += migrated_count;
                 },
-                Ok(-1) => {
+                Ok(KV_TRANSFER_NOT_FOUND) => {
                     for token_hash in hashes {
                         self.remove_server_from_kv_meta(token_hash, src_server.id);
                     }
                     result.status_not_found_count += migrated_count;
                 },
-                Ok(status) => {
+                Ok(KV_TRANSFER_FAILED) => {
                     tracing::warn!(
-                        "pressure migration returned non-success status: source_server={}, target_server={}, status={}",
+                        "pressure migration failed with zero satisfied chunks: source_server={}, target_server={}, batch_size={}, status={}",
                         src_server.id,
                         dst_server.id,
+                        migrated_count,
+                        KV_TRANSFER_FAILED
+                    );
+                    result.fail_count += migrated_count;
+                },
+                Ok(status) => {
+                    tracing::warn!(
+                        "pressure migration returned unknown non-success status: source_server={}, target_server={}, batch_size={}, status={}",
+                        src_server.id,
+                        dst_server.id,
+                        migrated_count,
                         status
                     );
                     result.fail_count += migrated_count;

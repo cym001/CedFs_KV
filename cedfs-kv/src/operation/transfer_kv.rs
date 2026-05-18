@@ -1,6 +1,18 @@
 use cedfs_proto::lmcache::lmcache_server_client::LmcacheServerClient;
 use cedfs_proto::lmcache::{TransferKvRequest, TransferKvResponse};
 
+pub const KV_TRANSFER_NOT_FOUND: i32 = -1;
+pub const KV_TRANSFER_FAILED: i32 = -2;
+pub const KV_TRANSFER_ALREADY_SATISFIED: i32 = 2_147_483_647;
+
+/// TransferKv 状态码语义：
+/// - `KV_TRANSFER_NOT_FOUND`: source worker 找不到 requested chunks。
+/// - `KV_TRANSFER_FAILED`: read 和目标端 existing 检查后仍然没有任何 satisfied chunk。
+/// - `KV_TRANSFER_ALREADY_SATISFIED`: 目标端已经拥有所有 requested chunks。
+/// - 其它正数：satisfied chunks 数量。
+///
+/// source worker 按 `num_read_chunks + num_existing_chunks` 计算 satisfied chunks。
+
 pub struct TransferKvOp {
     base_url: String,
 }
