@@ -1,8 +1,7 @@
 use dashmap::{DashMap, DashSet};
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -69,7 +68,6 @@ pub struct Shared {
 
     pub pressure_migration_request_count: Arc<AtomicU64>,
 
-    pub pending_eviction_suffixes: Arc<DashMap<u32, Mutex<VecDeque<[u8; 32]>>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,7 +166,6 @@ impl KVServer {
                     active_squence,
                     pressure_migration_in_flight: Arc::new(DashSet::new()),
                     pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
-                    pending_eviction_suffixes: Arc::new(DashMap::new()),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })

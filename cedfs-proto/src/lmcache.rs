@@ -16,10 +16,6 @@ pub struct TransferKvRequest {
     pub do_copy: bool,
     #[prost(uint32, repeated, tag = "7")]
     pub tokens: ::prost::alloc::vec::Vec<u32>,
-    #[prost(bytes = "vec", repeated, tag = "8")]
-    pub suggested_eviction_hashes: ::prost::alloc::vec::Vec<
-        ::prost::alloc::vec::Vec<u8>,
-    >,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct TransferKvResponse {
