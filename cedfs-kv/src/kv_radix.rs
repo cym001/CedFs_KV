@@ -425,12 +425,13 @@ impl KvRadixTree {
         stats
     }
 
-    pub fn should_trigger_migration(&self, beta: f64) -> bool {
+    pub fn should_trigger_migration(&self, beta: f64, absolute_threshold: f64) -> bool {
         let stats = self.pressure_stats();
-        if stats.max_server.is_none() || stats.avg_pressure <= 0.0 {
+        if stats.max_server.is_none() || stats.min_server.is_none() || stats.avg_pressure <= 0.0 {
             return false;
         }
-        stats.max_pressure - stats.min_pressure > beta * stats.avg_pressure
+        let gap = stats.max_pressure - stats.min_pressure;
+        gap > absolute_threshold && gap > beta * stats.avg_pressure
     }
 
     pub fn select_replication_candidates(
@@ -879,7 +880,9 @@ mod tests {
         let stats = index.pressure_stats();
         assert_eq!(stats.max_server, Some(1));
         assert_eq!(stats.min_server, Some(2));
-        assert!(index.should_trigger_migration(0.1));
+        assert!(index.should_trigger_migration(0.1, 3.0));
+        assert!(!index.should_trigger_migration(0.1, 4.0));
+        assert!(!index.should_trigger_migration(1.0, 3.0));
     }
 
     #[test]

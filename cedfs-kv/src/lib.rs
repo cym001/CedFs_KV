@@ -1,6 +1,7 @@
 use dashmap::{DashMap, DashSet};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -65,6 +66,8 @@ pub struct Shared {
     pub active_squence: Arc<ActiveSequences>,
 
     pub pressure_migration_in_flight: Arc<DashSet<(u32, u32)>>,
+
+    pub pressure_migration_request_count: Arc<AtomicU64>,
 
     pub pending_eviction_suffixes: Arc<DashMap<u32, Mutex<VecDeque<[u8; 32]>>>>,
 }
@@ -164,6 +167,7 @@ impl KVServer {
                     config: Arc::new(config),
                     active_squence,
                     pressure_migration_in_flight: Arc::new(DashSet::new()),
+                    pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
                     pending_eviction_suffixes: Arc::new(DashMap::new()),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
@@ -283,6 +287,8 @@ impl Shared {
     pub async fn rebalance_by_pressure(&self) -> anyhow::Result<PressureMigrationResult> {
         let beta = self.config.migration_beta;
         let delta = self.config.migration_delta;
+        let absolute_threshold =
+            delta * self.config.max_num_batch_tokens as f64 / self.config.block_size as f64;
         let mut result = PressureMigrationResult::default();
 
         for _ in 0..MAX_PRESSURE_REBALANCE_ROUNDS {
@@ -302,12 +308,16 @@ impl Shared {
             }
 
             let gap = stats.max_pressure - stats.min_pressure;
-            if result.rounds == 0 {
-                if gap <= beta * stats.avg_pressure {
-                    result.skipped_reason = Some("below_beta_threshold".to_string());
-                    return Ok(result);
+            if gap <= absolute_threshold {
+                if result.rounds == 0 {
+                    result.skipped_reason = Some("below_absolute_threshold".to_string());
                 }
-            } else if gap.abs() <= delta * stats.avg_pressure {
+                return Ok(result);
+            }
+            if gap <= beta * stats.avg_pressure {
+                if result.rounds == 0 {
+                    result.skipped_reason = Some("below_beta_threshold".to_string());
+                }
                 return Ok(result);
             }
 

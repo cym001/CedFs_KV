@@ -15,7 +15,6 @@ message TransferKvRequest {
     int32 target_port = 5;
     bool do_copy = 6;
     repeated uint32 tokens = 7;
-    repeated bytes suggested_eviction_hashes = 8;
 }
 
 message TransferKvResponse {

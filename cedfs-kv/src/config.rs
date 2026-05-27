@@ -60,8 +60,14 @@ pub struct Config {
     // 触发压力迁移的最大/最小实例压力差阈值比例
     pub migration_beta: f64,
 
-    // 压力迁移停止时允许的源/目标实例压力差阈值比例
+    // 压力迁移绝对阈值倍数
     pub migration_delta: f64,
+
+    // vLLM 单批次最大 token 数
+    pub max_num_batch_tokens: usize,
+
+    // 每结束多少个请求执行一次迁移判断
+    pub migration_check_request_interval: u64,
 
     // 是否开启 metrics 定时统计
     pub enable_metrics: bool,
@@ -147,6 +153,11 @@ impl Config {
         let migration_delta: f64 = config
             .get("migration_delta")
             .map_err(|e| ConfigError::MissingField(format!("migration_delta: {}", e)))?;
+        let max_num_batch_tokens: usize = config
+            .get("max_num_batch_tokens")
+            .map_err(|e| ConfigError::MissingField(format!("max_num_batch_tokens: {}", e)))?;
+        let migration_check_request_interval: u64 =
+            config.get("migration_check_request_interval").unwrap_or(1);
         let enable_metrics: bool = config
             .get("enable_metrics")
             .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
@@ -164,9 +175,14 @@ impl Config {
                 "migration_delta must be greater than 0".to_string(),
             ));
         }
-        if migration_delta >= migration_beta {
+        if max_num_batch_tokens == 0 {
             return Err(ConfigError::BuildError(
-                "migration_delta must be less than migration_beta".to_string(),
+                "max_num_batch_tokens must be greater than 0".to_string(),
+            ));
+        }
+        if migration_check_request_interval == 0 {
+            return Err(ConfigError::BuildError(
+                "migration_check_request_interval must be greater than 0".to_string(),
             ));
         }
         if enable_metrics && metrics_time == 0 {
@@ -195,6 +211,8 @@ impl Config {
             .transfer_strategy(transfer_strategy)
             .migration_beta(migration_beta)
             .migration_delta(migration_delta)
+            .max_num_batch_tokens(max_num_batch_tokens)
+            .migration_check_request_interval(migration_check_request_interval)
             .enable_metrics(enable_metrics)
             .metrics_time(metrics_time)
             .build()
