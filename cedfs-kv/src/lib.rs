@@ -241,9 +241,16 @@ impl Shared {
     /// - `token_hash`: 块的哈希值
     /// - `server_id`: 要移除的服务器ID
     pub fn remove_server_from_kv_meta(&self, token_hash: [u8; 32], server_id: u32) {
-        let before = self.kv_radix.replica_count(token_hash);
-        let removed = self.kv_radix.remove_server(token_hash, server_id);
-        if removed && before <= 1 {
+        let Some(report) = self.kv_radix.apply_eviction(server_id, token_hash) else {
+            tracing::debug!(
+                "remove_server_from_kv_meta: no replica to evict for server_id={}, token_hash {:?}",
+                server_id,
+                token_hash
+            );
+            return;
+        };
+
+        if report.removed && report.replica_count_before <= 1 {
             tracing::info!(
                 "Removed KV block {:?} from kv_radix as it has no replicas",
                 token_hash
@@ -251,9 +258,13 @@ impl Shared {
         }
 
         tracing::debug!(
-            "Removed server_id {} from KV metadata for token_hash {:?}",
+            "Removed server_id {} from KV metadata for token_hash {:?}: heat {} -> {}, replicas {} -> {}",
             server_id,
-            token_hash
+            token_hash,
+            report.heat_before,
+            report.heat_after,
+            report.replica_count_before,
+            report.replica_count_after
         );
     }
 
