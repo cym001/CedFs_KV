@@ -1,7 +1,7 @@
 use dashmap::{DashMap, DashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -67,7 +67,6 @@ pub struct Shared {
     pub pressure_migration_in_flight: Arc<DashSet<(u32, u32)>>,
 
     pub pressure_migration_request_count: Arc<AtomicU64>,
-
 }
 
 #[derive(Debug, Clone, Default)]
@@ -293,38 +292,26 @@ impl Shared {
     }
 
     pub async fn rebalance_by_pressure(&self) -> anyhow::Result<PressureMigrationResult> {
-        let beta = self.config.migration_beta;
         let delta = self.config.migration_delta;
         let absolute_threshold =
             delta * self.config.max_num_batch_tokens as f64 / self.config.block_size as f64;
         let mut result = PressureMigrationResult::default();
 
         for _ in 0..MAX_PRESSURE_REBALANCE_ROUNDS {
-            let stats = self.kv_radix.pressure_stats();
-            let Some(src_server_id) = stats.max_server else {
+            let extremes = self.kv_radix.pressure_extremes();
+            let Some(src_server_id) = extremes.max_server else {
                 result.skipped_reason = Some("no_source_server".to_string());
                 return Ok(result);
             };
-            let Some(dst_server_id) = stats.min_server else {
+            let Some(dst_server_id) = extremes.min_server else {
                 result.skipped_reason = Some("no_target_server".to_string());
                 return Ok(result);
             };
 
-            if stats.avg_pressure <= 0.0 {
-                result.skipped_reason = Some("zero_average_pressure".to_string());
-                return Ok(result);
-            }
-
-            let gap = stats.max_pressure - stats.min_pressure;
+            let gap = extremes.max_pressure - extremes.min_pressure;
             if gap <= absolute_threshold {
                 if result.rounds == 0 {
                     result.skipped_reason = Some("below_absolute_threshold".to_string());
-                }
-                return Ok(result);
-            }
-            if gap <= beta * stats.avg_pressure {
-                if result.rounds == 0 {
-                    result.skipped_reason = Some("below_beta_threshold".to_string());
                 }
                 return Ok(result);
             }
@@ -344,9 +331,9 @@ impl Shared {
                 pair: migration_pair,
             };
 
-            let candidates =
-                self.kv_radix
-                    .select_replication_candidates(src_server_id, dst_server_id, delta);
+            let candidates = self
+                .kv_radix
+                .select_replication_candidates(src_server_id, dst_server_id);
             if candidates.is_empty() {
                 result.skipped_reason = Some("no_replication_candidates".to_string());
                 return Ok(result);

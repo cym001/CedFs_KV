@@ -88,12 +88,11 @@ pub struct InstanceMetricsSnapshot {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PressureStats {
+pub struct PressureExtremes {
     pub max_server: Option<ServerId>,
     pub max_pressure: f64,
     pub min_server: Option<ServerId>,
     pub min_pressure: f64,
-    pub avg_pressure: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -388,57 +387,39 @@ impl KvRadixTree {
             .sum()
     }
 
-    pub fn pressure_stats(&self) -> PressureStats {
-        let mut stats = PressureStats::default();
-        let mut total = 0.0;
-        let mut count = 0usize;
+    pub fn pressure_extremes(&self) -> PressureExtremes {
+        let mut extremes = PressureExtremes::default();
 
         for entry in self.lookup.iter() {
             let server_id = *entry.key();
             let pressure = self.instance_pressure(server_id);
-            total += pressure;
-            count += 1;
 
-            if stats
+            if extremes
                 .max_server
-                .map(|_| pressure > stats.max_pressure)
+                .map(|_| pressure > extremes.max_pressure)
                 .unwrap_or(true)
             {
-                stats.max_server = Some(server_id);
-                stats.max_pressure = pressure;
+                extremes.max_server = Some(server_id);
+                extremes.max_pressure = pressure;
             }
 
-            if stats
+            if extremes
                 .min_server
-                .map(|_| pressure < stats.min_pressure)
+                .map(|_| pressure < extremes.min_pressure)
                 .unwrap_or(true)
             {
-                stats.min_server = Some(server_id);
-                stats.min_pressure = pressure;
+                extremes.min_server = Some(server_id);
+                extremes.min_pressure = pressure;
             }
         }
 
-        if count > 0 {
-            stats.avg_pressure = total / count as f64;
-        }
-
-        stats
-    }
-
-    pub fn should_trigger_migration(&self, beta: f64, absolute_threshold: f64) -> bool {
-        let stats = self.pressure_stats();
-        if stats.max_server.is_none() || stats.min_server.is_none() || stats.avg_pressure <= 0.0 {
-            return false;
-        }
-        let gap = stats.max_pressure - stats.min_pressure;
-        gap > absolute_threshold && gap > beta * stats.avg_pressure
+        extremes
     }
 
     pub fn select_replication_candidates(
         &self,
         src_server: ServerId,
         dst_server: ServerId,
-        _delta: f64,
     ) -> Vec<MigrationCandidate> {
         let mut candidates = self.replication_candidate_pool(src_server, dst_server);
 
@@ -863,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_stats_match_manual_values() {
+    fn pressure_extremes_match_manual_values() {
         let index = KvRadixTree::new();
         let blocks = vec![info(0, 10, 20, 4), info(1, 11, 21, 4)];
         index.store_blocks(1, &blocks);
@@ -877,12 +858,12 @@ mod tests {
 
         assert_eq!(index.instance_pressure(1), 7.0);
         assert_eq!(index.instance_pressure(2), 3.0);
-        let stats = index.pressure_stats();
-        assert_eq!(stats.max_server, Some(1));
-        assert_eq!(stats.min_server, Some(2));
-        assert!(index.should_trigger_migration(0.1, 3.0));
-        assert!(!index.should_trigger_migration(0.1, 4.0));
-        assert!(!index.should_trigger_migration(1.0, 3.0));
+        let extremes = index.pressure_extremes();
+        assert_eq!(extremes.max_server, Some(1));
+        assert_eq!(extremes.min_server, Some(2));
+        let gap = extremes.max_pressure - extremes.min_pressure;
+        assert!(gap > 3.0);
+        assert!(!(gap > 4.0));
     }
 
     #[test]
@@ -898,7 +879,7 @@ mod tests {
             index.increment_heat(blocks[2].seq_hash);
         }
 
-        let candidates = index.select_replication_candidates(1, 2, 0.1);
+        let candidates = index.select_replication_candidates(1, 2);
         assert_eq!(candidates[0].seq_hash, blocks[1].seq_hash);
         assert_eq!(candidates[1].seq_hash, blocks[2].seq_hash);
         assert!(candidates.iter().all(|candidate| candidate.src_server == 1));
@@ -918,7 +899,7 @@ mod tests {
             index.increment_heat(blocks[2].seq_hash);
         }
 
-        let candidates = index.select_replication_candidates(1, 2, 10.0);
+        let candidates = index.select_replication_candidates(1, 2);
         let selected_hashes: Vec<_> = candidates
             .iter()
             .map(|candidate| candidate.seq_hash)

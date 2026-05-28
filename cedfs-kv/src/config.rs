@@ -57,9 +57,6 @@ pub struct Config {
     // 是否迁移KV Cache
     pub transfer_strategy: bool,
 
-    // 触发压力迁移的最大/最小实例压力差阈值比例
-    pub migration_beta: f64,
-
     // 压力迁移绝对阈值倍数
     pub migration_delta: f64,
 
@@ -147,9 +144,6 @@ impl Config {
             .get("transfer_strategy")
             .map_err(|e| ConfigError::MissingField(format!("transfer_strategy: {}", e)))?;
 
-        let migration_beta: f64 = config
-            .get("migration_beta")
-            .map_err(|e| ConfigError::MissingField(format!("migration_beta: {}", e)))?;
         let migration_delta: f64 = config
             .get("migration_delta")
             .map_err(|e| ConfigError::MissingField(format!("migration_delta: {}", e)))?;
@@ -165,11 +159,6 @@ impl Config {
             .get("metrics_time")
             .map_err(|e| ConfigError::MissingField(format!("metrics_time: {}", e)))?;
 
-        if migration_beta <= 0.0 {
-            return Err(ConfigError::BuildError(
-                "migration_beta must be greater than 0".to_string(),
-            ));
-        }
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
                 "migration_delta must be greater than 0".to_string(),
@@ -209,7 +198,6 @@ impl Config {
             .model_tokenizer_map(model_tokenizer_map)
             .scheduler_strategy(scheduler_strategy)
             .transfer_strategy(transfer_strategy)
-            .migration_beta(migration_beta)
             .migration_delta(migration_delta)
             .max_num_batch_tokens(max_num_batch_tokens)
             .migration_check_request_interval(migration_check_request_interval)
