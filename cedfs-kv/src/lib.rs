@@ -2,16 +2,18 @@ use dashmap::{DashMap, DashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::info;
 
+use chrono::Utc;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 
 use crate::config::Config;
 use crate::hash::{HashAlgorithm, TokenHasher};
 use crate::kv_radix::KvRadixTree;
+use crate::metrics::{MetricsCollector, MigrationSelectionRecord, ReplicationRpcRecord};
 use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::operation::transfer_kv::{
@@ -28,12 +30,14 @@ pub mod types;
 pub mod convert;
 pub mod hash;
 pub mod kv_radix;
+pub mod metrics;
 pub mod network;
 pub mod operation;
 pub mod tokenizers;
 pub mod transfer;
 
 const MAX_PRESSURE_REBALANCE_ROUNDS: usize = 16;
+const METRICS_DELAY_SECS: u64 = 600;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -67,6 +71,8 @@ pub struct Shared {
     pub pressure_migration_in_flight: Arc<DashSet<(u32, u32)>>,
 
     pub pressure_migration_request_count: Arc<AtomicU64>,
+
+    pub metrics_collector: Option<Arc<MetricsCollector>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +159,12 @@ impl KVServer {
 
                 let active_squence = Arc::new(ActiveSequences::new(config.block_size));
 
+                let metrics_collector = if config.enable_metrics {
+                    Some(Arc::new(MetricsCollector::default()))
+                } else {
+                    None
+                };
+
                 let shared = Shared {
                     meta_server_collect: meta_servers,
                     global_data_server_collect: Arc::new(DashMap::new()),
@@ -165,6 +177,7 @@ impl KVServer {
                     active_squence,
                     pressure_migration_in_flight: Arc::new(DashSet::new()),
                     pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
+                    metrics_collector,
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })
@@ -202,34 +215,72 @@ impl KVServer {
 
 impl Shared {
     pub fn launch_metrics_reporter(&self) {
-        if !self.config.enable_metrics {
+        let Some(collector) = self.metrics_collector.clone() else {
             return;
-        }
+        };
 
-        let metrics_time = self.config.metrics_time;
         let kv_radix = self.kv_radix.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(metrics_time));
+            tokio::time::sleep(Duration::from_secs(METRICS_DELAY_SECS)).await;
 
-            loop {
-                interval.tick().await;
-                let snapshots = kv_radix.instance_metrics_snapshots();
-
-                if snapshots.is_empty() {
-                    tracing::info!("kv metrics: no registered kv blocks");
-                    continue;
-                }
-
-                for snapshot in snapshots {
-                    tracing::info!(
-                        "kv metrics: server_id={}, total_heat={}, kv_block_count={}, total_replica_count={}",
+            let instance_snapshots = kv_radix.instance_metrics_snapshots();
+            if instance_snapshots.is_empty() {
+                tracing::error!("kv metrics [instance]: no registered instances");
+            } else {
+                for snapshot in &instance_snapshots {
+                    tracing::error!(
+                        "kv metrics [instance]: server_id={}, kv_block_count={}, total_heat={}",
                         snapshot.server_id,
-                        snapshot.total_heat,
                         snapshot.kv_block_count,
-                        snapshot.total_replica_count
+                        snapshot.total_heat
                     );
                 }
+            }
+
+            let block_snapshots = kv_radix.all_block_metrics();
+            if block_snapshots.is_empty() {
+                tracing::error!("kv metrics [block]: no registered kv blocks");
+            } else {
+                for block in &block_snapshots {
+                    tracing::error!(
+                        "kv metrics [block]: seq_hash={:?}, replica_count={}, heat={}",
+                        block.seq_hash,
+                        block.replica_count,
+                        block.heat
+                    );
+                }
+            }
+
+            let replication_rpcs = collector.drain_replication_rpcs();
+            tracing::error!(
+                "kv metrics [replication_rpc]: count={}",
+                replication_rpcs.len()
+            );
+            for (index, record) in replication_rpcs.iter().enumerate() {
+                tracing::error!(
+                    "kv metrics [replication_rpc]: index={}, start={}, end={}, block_count={}",
+                    index,
+                    record.start.to_rfc3339(),
+                    record.end.to_rfc3339(),
+                    record.block_count
+                );
+            }
+
+            let migration_selections = collector.drain_migration_selections();
+            tracing::error!(
+                "kv metrics [migration_selection]: count={}",
+                migration_selections.len()
+            );
+            for (index, record) in migration_selections.iter().enumerate() {
+                tracing::error!(
+                    "kv metrics [migration_selection]: index={}, duration_ms={}, src_server_id={}, dst_server_id={}, candidate_count={}",
+                    index,
+                    record.duration.as_millis(),
+                    record.src_server_id,
+                    record.dst_server_id,
+                    record.candidate_count
+                );
             }
         });
     }
@@ -331,17 +382,21 @@ impl Shared {
                 pair: migration_pair,
             };
 
+            let selection_started = Instant::now();
             let candidates = self
                 .kv_radix
                 .select_replication_candidates(src_server_id, dst_server_id);
+            let selection_duration = selection_started.elapsed();
             if candidates.is_empty() {
                 result.skipped_reason = Some("no_replication_candidates".to_string());
                 return Ok(result);
             }
 
+            let candidate_count = candidates.len();
+
             result.selected_source_server_id = Some(src_server_id);
             result.selected_target_server_id = Some(dst_server_id);
-            result.candidate_count += candidates.len();
+            result.candidate_count += candidate_count;
 
             let Some(src_server) = self.find_data_server(src_server_id).await else {
                 result.skipped_reason = Some("source_server_not_found".to_string());
@@ -386,6 +441,12 @@ impl Shared {
                             .await;
                     }
                     result.success_count += migrated_count;
+                    self.record_migration_selection(
+                        selection_duration,
+                        src_server_id,
+                        dst_server_id,
+                        candidate_count,
+                    );
                 },
                 Ok(status) if status > 0 => {
                     for token_hash in hashes {
@@ -393,6 +454,12 @@ impl Shared {
                             .await;
                     }
                     result.success_count += migrated_count;
+                    self.record_migration_selection(
+                        selection_duration,
+                        src_server_id,
+                        dst_server_id,
+                        candidate_count,
+                    );
                 },
                 Ok(KV_TRANSFER_NOT_FOUND) => {
                     for token_hash in hashes {
@@ -454,7 +521,8 @@ impl Shared {
             concatenated_hash_bytes.extend_from_slice(token_hash);
         }
 
-        let response = client
+        let rpc_start = Utc::now();
+        let transfer_result = client
             .send_transfer_request(
                 concatenated_hash_bytes,
                 position,
@@ -464,8 +532,35 @@ impl Shared {
                 dst_server.init_port as i32,
                 true,
             )
-            .await?;
-        Ok(response.status)
+            .await;
+        let rpc_end = Utc::now();
+
+        if let Some(collector) = &self.metrics_collector {
+            collector.record_replication_rpc(ReplicationRpcRecord {
+                start: rpc_start,
+                end: rpc_end,
+                block_count: hashes.len(),
+            });
+        }
+
+        Ok(transfer_result?.status)
+    }
+
+    fn record_migration_selection(
+        &self,
+        duration: Duration,
+        src_server_id: u32,
+        dst_server_id: u32,
+        candidate_count: usize,
+    ) {
+        if let Some(collector) = &self.metrics_collector {
+            collector.record_migration_selection(MigrationSelectionRecord {
+                duration,
+                src_server_id,
+                dst_server_id,
+                candidate_count,
+            });
+        }
     }
 
     async fn find_data_server(&self, server_id: u32) -> Option<DataServer> {

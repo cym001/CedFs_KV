@@ -68,9 +68,6 @@ pub struct Config {
 
     // 是否开启 metrics 定时统计
     pub enable_metrics: bool,
-
-    // metrics 定时统计间隔，单位秒
-    pub metrics_time: u64,
 }
 
 impl Config {
@@ -155,9 +152,6 @@ impl Config {
         let enable_metrics: bool = config
             .get("enable_metrics")
             .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
-        let metrics_time: u64 = config
-            .get("metrics_time")
-            .map_err(|e| ConfigError::MissingField(format!("metrics_time: {}", e)))?;
 
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -172,11 +166,6 @@ impl Config {
         if migration_check_request_interval == 0 {
             return Err(ConfigError::BuildError(
                 "migration_check_request_interval must be greater than 0".to_string(),
-            ));
-        }
-        if enable_metrics && metrics_time == 0 {
-            return Err(ConfigError::BuildError(
-                "metrics_time must be greater than 0 when enable_metrics is true".to_string(),
             ));
         }
 
@@ -202,7 +191,6 @@ impl Config {
             .max_num_batch_tokens(max_num_batch_tokens)
             .migration_check_request_interval(migration_check_request_interval)
             .enable_metrics(enable_metrics)
-            .metrics_time(metrics_time)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

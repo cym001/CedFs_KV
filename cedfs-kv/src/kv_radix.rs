@@ -87,6 +87,13 @@ pub struct InstanceMetricsSnapshot {
     pub total_replica_count: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct BlockMetricsSnapshot {
+    pub seq_hash: BlockHash,
+    pub replica_count: u32,
+    pub heat: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PressureExtremes {
     pub max_server: Option<ServerId>,
@@ -170,6 +177,26 @@ impl KvRadixTree {
         }
 
         snapshots.sort_by_key(|snapshot| snapshot.server_id);
+        snapshots
+    }
+
+    pub fn all_block_metrics(&self) -> Vec<BlockMetricsSnapshot> {
+        let mut snapshots = self
+            .block_index
+            .iter()
+            .filter_map(|entry| {
+                let seq_hash = *entry.key();
+                let node = entry.value();
+                let block = node.read().expect("radix block poisoned");
+                Some(BlockMetricsSnapshot {
+                    seq_hash,
+                    replica_count: block.servers.len() as u32,
+                    heat: block.heat,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        snapshots.sort_by_key(|snapshot| snapshot.seq_hash);
         snapshots
     }
 
@@ -761,6 +788,29 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert_eq!(index.match_len_for_server(7, &blocks), 2);
         assert_eq!(index.find_matches(&blocks), vec![(7, 8)]);
+    }
+
+    #[test]
+    fn all_block_metrics_returns_replica_count_and_heat() {
+        let index = KvRadixTree::new();
+        let blocks = vec![info(0, 10, 20, 4), info(1, 11, 21, 4)];
+        index.store_blocks(1, &blocks);
+        index.store_blocks(2, &blocks[..1]);
+        for _ in 0..3 {
+            index.increment_heat(blocks[0].seq_hash);
+        }
+        for _ in 0..5 {
+            index.increment_heat(blocks[1].seq_hash);
+        }
+
+        let metrics = index.all_block_metrics();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].seq_hash, blocks[0].seq_hash);
+        assert_eq!(metrics[0].replica_count, 2);
+        assert_eq!(metrics[0].heat, 3);
+        assert_eq!(metrics[1].seq_hash, blocks[1].seq_hash);
+        assert_eq!(metrics[1].replica_count, 1);
+        assert_eq!(metrics[1].heat, 5);
     }
 
     #[test]
