@@ -38,6 +38,19 @@ pub mod transfer;
 
 const MAX_PRESSURE_REBALANCE_ROUNDS: usize = 16;
 const METRICS_DELAY_SECS: u64 = 600;
+const KV_CACHE_BYTES_PER_TOKEN: f64 = 96.0 * 1024.0;
+const BITS_PER_BYTE: f64 = 8.0;
+const BITS_PER_MEGABIT: f64 = 1_000_000.0;
+
+fn migration_cooldown_duration(token_count: usize, bandwidth_mbps: u64) -> Duration {
+    if token_count == 0 {
+        return Duration::ZERO;
+    }
+
+    let seconds = token_count as f64 * KV_CACHE_BYTES_PER_TOKEN * BITS_PER_BYTE
+        / (bandwidth_mbps as f64 * BITS_PER_MEGABIT);
+    Duration::from_secs_f64(seconds)
+}
 
 #[derive(Clone)]
 pub struct Shared {
@@ -69,6 +82,8 @@ pub struct Shared {
     pub active_squence: Arc<ActiveSequences>,
 
     pub pressure_migration_in_flight: Arc<DashSet<(u32, u32)>>,
+
+    pub pressure_migration_next_allowed_at: Arc<DashMap<(u32, u32), Instant>>,
 
     pub pressure_migration_request_count: Arc<AtomicU64>,
 
@@ -176,6 +191,7 @@ impl KVServer {
                     config: Arc::new(config),
                     active_squence,
                     pressure_migration_in_flight: Arc::new(DashSet::new()),
+                    pressure_migration_next_allowed_at: Arc::new(DashMap::new()),
                     pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
                     metrics_collector,
                 };
@@ -368,6 +384,27 @@ impl Shared {
             }
 
             let migration_pair = (src_server_id, dst_server_id);
+            if let Some(next_allowed_at) = self
+                .pressure_migration_next_allowed_at
+                .get(&migration_pair)
+                .map(|entry| *entry.value())
+            {
+                let now = Instant::now();
+                if now < next_allowed_at {
+                    if result.rounds == 0 {
+                        result.skipped_reason =
+                            Some("migration_pair_bandwidth_cooldown".to_string());
+                    }
+                    tracing::debug!(
+                        "pressure migration skipped by bandwidth cooldown: source_server={}, target_server={}, remaining_ms={}",
+                        src_server_id,
+                        dst_server_id,
+                        next_allowed_at.saturating_duration_since(now).as_millis()
+                    );
+                    return Ok(result);
+                }
+            }
+
             if !self.pressure_migration_in_flight.insert(migration_pair) {
                 result.skipped_reason = Some("migration_pair_in_flight".to_string());
                 tracing::info!(
@@ -424,8 +461,15 @@ impl Shared {
             }
 
             let migrated_count = hashes.len();
+            let migrated_token_count = token_ids.len();
             match self
-                .transfer_pressure_candidates(&src_server, &dst_server, &hashes, offsets, token_ids)
+                .transfer_pressure_candidates(
+                    &src_server,
+                    &dst_server,
+                    &hashes,
+                    offsets,
+                    token_ids,
+                )
                 .await
             {
                 Ok(KV_TRANSFER_ALREADY_SATISFIED) => {
@@ -460,6 +504,7 @@ impl Shared {
                         dst_server_id,
                         candidate_count,
                     );
+                    self.update_migration_pair_cooldown(migration_pair, migrated_token_count);
                 },
                 Ok(KV_TRANSFER_NOT_FOUND) => {
                     for token_hash in hashes {
@@ -561,6 +606,26 @@ impl Shared {
                 candidate_count,
             });
         }
+    }
+
+    fn update_migration_pair_cooldown(&self, migration_pair: (u32, u32), token_count: usize) {
+        let bandwidth_mbps = self.config.migration_network_bandwidth_mbps;
+        let cooldown = migration_cooldown_duration(token_count, bandwidth_mbps);
+        if cooldown.is_zero() {
+            return;
+        }
+
+        let next_allowed_at = Instant::now() + cooldown;
+        self.pressure_migration_next_allowed_at
+            .insert(migration_pair, next_allowed_at);
+        tracing::info!(
+            "pressure migration bandwidth cooldown updated: source_server={}, target_server={}, bandwidth_mbps={}, migrated_token_count={}, cooldown_ms={}",
+            migration_pair.0,
+            migration_pair.1,
+            bandwidth_mbps,
+            token_count,
+            cooldown.as_millis()
+        );
     }
 
     async fn find_data_server(&self, server_id: u32) -> Option<DataServer> {

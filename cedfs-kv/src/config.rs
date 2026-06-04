@@ -66,6 +66,9 @@ pub struct Config {
     // 每结束多少个请求执行一次迁移判断
     pub migration_check_request_interval: u64,
 
+    // 模拟 KV Cache 迁移网络带宽，单位 Mbps
+    pub migration_network_bandwidth_mbps: u64,
+
     // 是否开启 metrics 定时统计
     pub enable_metrics: bool,
 }
@@ -149,6 +152,11 @@ impl Config {
             .map_err(|e| ConfigError::MissingField(format!("max_num_batch_tokens: {}", e)))?;
         let migration_check_request_interval: u64 =
             config.get("migration_check_request_interval").unwrap_or(1);
+        let migration_network_bandwidth_mbps: u64 = config
+            .get("migration_network_bandwidth_mbps")
+            .map_err(|e| {
+                ConfigError::MissingField(format!("migration_network_bandwidth_mbps: {}", e))
+            })?;
         let enable_metrics: bool = config
             .get("enable_metrics")
             .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
@@ -166,6 +174,11 @@ impl Config {
         if migration_check_request_interval == 0 {
             return Err(ConfigError::BuildError(
                 "migration_check_request_interval must be greater than 0".to_string(),
+            ));
+        }
+        if !matches!(migration_network_bandwidth_mbps, 500 | 1000 | 10000) {
+            return Err(ConfigError::BuildError(
+                "migration_network_bandwidth_mbps must be one of 500, 1000, 10000".to_string(),
             ));
         }
 
@@ -190,6 +203,7 @@ impl Config {
             .migration_delta(migration_delta)
             .max_num_batch_tokens(max_num_batch_tokens)
             .migration_check_request_interval(migration_check_request_interval)
+            .migration_network_bandwidth_mbps(migration_network_bandwidth_mbps)
             .enable_metrics(enable_metrics)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
