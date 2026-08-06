@@ -1,10 +1,9 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-/// Duration after which stale requests are forcibly expired (5 minutes)
-const EXPIRY_DURATION: Duration = Duration::from_secs(300);
+const DEFAULT_EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
@@ -14,22 +13,28 @@ pub type RequestId = String;
 pub struct ActiveSequences {
     active_seqs: DashMap<RequestId, Vec<([u8; 32], Arc<()>)>>,
     unique_blocks: DashMap<[u8; 32], Weak<()>>,
-    expiry_requests: DashSet<RequestId>,
+    request_deadlines: DashMap<RequestId, Instant>,
     expiry_timer: Mutex<Instant>,
+    request_ttl: Duration,
     block_size: usize,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub fn new(block_size: usize) -> Self {
+        Self::new_with_ttl(block_size, DEFAULT_EXPIRY_DURATION)
+    }
+
+    pub fn new_with_ttl(block_size: usize, request_ttl: Duration) -> Self {
         // TODO: make this not a hard req
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
             active_seqs: DashMap::new(),
             unique_blocks: DashMap::new(),
-            expiry_requests: DashSet::new(),
-            expiry_timer: Mutex::new(Instant::now() + EXPIRY_DURATION),
+            request_deadlines: DashMap::new(),
+            expiry_timer: Mutex::new(Instant::now() + request_ttl.min(Duration::from_secs(1))),
+            request_ttl,
             block_size,
         }
     }
@@ -87,14 +92,14 @@ impl ActiveSequences {
         request_id: RequestId,
         token_sequence: Option<Vec<[u8; 32]>>,
     ) -> HashSet<RequestId> {
-        // Check for double-add and log error, returning early
-        if self.active_seqs.contains_key(&request_id) {
-            tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
-            return HashSet::new();
-        }
-
-        // Lazily check and clean up expired requests, capturing removed IDs
         let removed_requests = self.force_expiry();
+
+        // Duplicate start is idempotent and only refreshes this request's TTL.
+        if self.active_seqs.contains_key(&request_id) {
+            self.request_deadlines
+                .insert(request_id, Instant::now() + self.request_ttl);
+            return removed_requests;
+        }
 
         if let Some(sequence) = token_sequence {
             let sequence_with_refs: Vec<([u8; 32], Arc<()>)> = sequence
@@ -107,7 +112,8 @@ impl ActiveSequences {
             // dummy empty sequence
             self.active_seqs.insert(request_id.clone(), Vec::new());
         }
-        self.expiry_requests.insert(request_id);
+        self.request_deadlines
+            .insert(request_id, Instant::now() + self.request_ttl);
 
         removed_requests
     }
@@ -143,7 +149,7 @@ impl ActiveSequences {
 
     /// Free all blocks associated with a request
     pub fn free(&self, request_id: &RequestId) -> usize {
-        self.expiry_requests.remove(request_id);
+        self.request_deadlines.remove(request_id);
 
         // Remove from active_seqs and get the token sequence
         let token_seq = match self.active_seqs.remove(request_id) {
@@ -172,18 +178,17 @@ impl ActiveSequences {
             return HashSet::new();
         }
 
-        let expired_requests: HashSet<RequestId> =
-            self.expiry_requests.iter().map(|id| id.clone()).collect();
-        self.expiry_requests.clear();
+        let expired_requests: HashSet<RequestId> = self
+            .request_deadlines
+            .iter()
+            .filter_map(|entry| (*entry.value() <= now).then(|| entry.key().clone()))
+            .collect();
         for request_id in &expired_requests {
             tracing::warn!("Force expiring stale request: {}", request_id);
             self.free(request_id);
         }
 
-        *timer = now + EXPIRY_DURATION;
-        for request_id in self.active_seqs.iter().map(|entry| entry.key().clone()) {
-            self.expiry_requests.insert(request_id);
-        }
+        *timer = now + self.request_ttl.min(Duration::from_secs(1));
 
         expired_requests
     }

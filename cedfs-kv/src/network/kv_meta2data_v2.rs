@@ -21,12 +21,6 @@ pub struct KvCacheDataServiceV2 {
     pub(crate) shared: Shared,
 }
 
-fn phase_a_unimplemented<T>() -> Result<Response<T>, Status> {
-    Err(Status::unimplemented(
-        "V2 state handling is disabled in the phase A protocol skeleton",
-    ))
-}
-
 #[tonic::async_trait]
 impl KvMeta2DataV2 for KvCacheDataServiceV2 {
     async fn get_capabilities(
@@ -40,6 +34,9 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
                 "capability_handshake".to_string(),
                 "instance_registration".to_string(),
                 "cache_mutation_shadow".to_string(),
+                "lease_heartbeat".to_string(),
+                "inventory_sync".to_string(),
+                "request_lifecycle".to_string(),
             ],
             transfer_enabled: self.shared.config.enable_v2_transfer,
             descriptor_sha256: Sha256::digest(cedfs_proto::V2_DESCRIPTOR_SET).to_vec(),
@@ -60,16 +57,22 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
 
     async fn heartbeat(
         &self,
-        _request: Request<HeartbeatV2Request>,
+        request: Request<HeartbeatV2Request>,
     ) -> Result<Response<HeartbeatV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.heartbeat(request.into_inner())))
     }
 
     async fn unregister_instance(
         &self,
-        _request: Request<UnregisterInstanceV2Request>,
+        request: Request<UnregisterInstanceV2Request>,
     ) -> Result<Response<UnregisterInstanceV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.unregister(request.into_inner())))
     }
 
     async fn report_cache_mutations(
@@ -86,43 +89,96 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
 
     async fn begin_inventory_sync(
         &self,
-        _request: Request<BeginInventorySyncV2Request>,
+        request: Request<BeginInventorySyncV2Request>,
     ) -> Result<Response<BeginInventorySyncV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.begin_inventory_sync(request.into_inner())))
     }
 
     async fn upload_inventory_page(
         &self,
-        _request: Request<UploadInventoryPageV2Request>,
+        request: Request<UploadInventoryPageV2Request>,
     ) -> Result<Response<UploadInventoryPageV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.upload_inventory_page(request.into_inner())))
     }
 
     async fn commit_inventory_sync(
         &self,
-        _request: Request<CommitInventorySyncV2Request>,
+        request: Request<CommitInventorySyncV2Request>,
     ) -> Result<Response<CommitInventorySyncV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.commit_inventory_sync(request.into_inner())))
     }
 
     async fn abort_inventory_sync(
         &self,
-        _request: Request<AbortInventorySyncV2Request>,
+        request: Request<AbortInventorySyncV2Request>,
     ) -> Result<Response<AbortInventorySyncV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        Ok(Response::new(state.abort_inventory_sync(request.into_inner())))
     }
 
     async fn report_request_start(
         &self,
-        _request: Request<ReportRequestStartV2Request>,
+        request: Request<ReportRequestStartV2Request>,
     ) -> Result<Response<ReportRequestV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        let request = request.into_inner();
+        let active_id = composite_request_id(request.request.as_ref());
+        let hashes: Vec<[u8; 32]> = request
+            .blocks
+            .iter()
+            .filter_map(|block| block.seq_hash.as_slice().try_into().ok())
+            .collect();
+        let response = state.report_request_start(request);
+        if response.accepted && !response.duplicate {
+            if let Some(active_id) = active_id {
+                self.shared
+                    .active_squence
+                    .add_request(active_id, Some(hashes));
+            }
+        }
+        Ok(Response::new(response))
     }
 
     async fn report_request_end(
         &self,
-        _request: Request<ReportRequestEndV2Request>,
+        request: Request<ReportRequestEndV2Request>,
     ) -> Result<Response<ReportRequestV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self.shared.v2_state.as_ref().ok_or_else(|| {
+            Status::failed_precondition("V2 state is disabled")
+        })?;
+        let request = request.into_inner();
+        let active_id = composite_request_id(request.request.as_ref());
+        let response = state.report_request_end(request);
+        if response.accepted {
+            if let Some(active_id) = active_id {
+                self.shared.active_squence.free(&active_id);
+            }
+        }
+        Ok(Response::new(response))
     }
+}
+
+fn composite_request_id(
+    request: Option<&cedfs_proto::kvcache_v2::RequestIdentityV2>,
+) -> Option<String> {
+    let request = request?;
+    let instance = request.instance.as_ref()?;
+    let key = instance.key.as_ref()?;
+    Some(format!(
+        "{}:{}:{}:{}",
+        key.lmcache_instance_id, key.worker_id, instance.epoch, request.request_id
+    ))
 }

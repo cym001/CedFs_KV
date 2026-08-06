@@ -102,6 +102,10 @@ pub struct Config {
     pub v2_transfer_max_tokens: u64,
     pub v2_transfer_max_bytes: u64,
     pub v2_transfer_rpc_timeout_ms: u64,
+    pub v2_lease_ttl_ms: u64,
+    pub v2_request_ttl_ms: u64,
+    pub v2_inventory_page_limit: u32,
+    pub v2_maintenance_interval_ms: u64,
 }
 
 impl Config {
@@ -205,6 +209,12 @@ impl Config {
         let v2_transfer_rpc_timeout_ms = config
             .get("v2_transfer_rpc_timeout_ms")
             .unwrap_or(5_000);
+        let v2_lease_ttl_ms = config.get("v2_lease_ttl_ms").unwrap_or(30_000);
+        let v2_request_ttl_ms = config.get("v2_request_ttl_ms").unwrap_or(300_000);
+        let v2_inventory_page_limit = config.get("v2_inventory_page_limit").unwrap_or(256);
+        let v2_maintenance_interval_ms = config
+            .get("v2_maintenance_interval_ms")
+            .unwrap_or(5_000);
 
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -235,9 +245,19 @@ impl Config {
             || v2_transfer_max_tokens == 0
             || v2_transfer_max_bytes == 0
             || v2_transfer_rpc_timeout_ms == 0
+            || v2_lease_ttl_ms == 0
+            || v2_request_ttl_ms == 0
+            || v2_inventory_page_limit == 0
+            || v2_maintenance_interval_ms == 0
         {
             return Err(ConfigError::BuildError(
                 "V2 transfer limits and timeout must be greater than 0".to_string(),
+            ));
+        }
+        if v2_maintenance_interval_ms >= v2_lease_ttl_ms {
+            return Err(ConfigError::BuildError(
+                "v2_maintenance_interval_ms must be less than v2_lease_ttl_ms"
+                    .to_string(),
             ));
         }
 
@@ -270,6 +290,10 @@ impl Config {
             .v2_transfer_max_tokens(v2_transfer_max_tokens)
             .v2_transfer_max_bytes(v2_transfer_max_bytes)
             .v2_transfer_rpc_timeout_ms(v2_transfer_rpc_timeout_ms)
+            .v2_lease_ttl_ms(v2_lease_ttl_ms)
+            .v2_request_ttl_ms(v2_request_ttl_ms)
+            .v2_inventory_page_limit(v2_inventory_page_limit)
+            .v2_maintenance_interval_ms(v2_maintenance_interval_ms)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

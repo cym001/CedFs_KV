@@ -180,7 +180,10 @@ impl KVServer {
                     TokenizerManager::new_with_preload(config.model_tokenizer_map.clone()).await,
                 );
 
-                let active_squence = Arc::new(ActiveSequences::new(config.block_size));
+                let active_squence = Arc::new(ActiveSequences::new_with_ttl(
+                    config.block_size,
+                    Duration::from_millis(config.v2_request_ttl_ms),
+                ));
 
                 let metrics_collector = if config.enable_metrics {
                     Some(Arc::new(MetricsCollector::default()))
@@ -191,7 +194,11 @@ impl KVServer {
                 let v2_state = if config.protocol_mode == ProtocolMode::V1 {
                     None
                 } else {
-                    Some(Arc::new(state::v2::V2State::default()))
+                    Some(Arc::new(state::v2::V2State::new(
+                        Duration::from_millis(config.v2_lease_ttl_ms),
+                        Duration::from_millis(config.v2_request_ttl_ms),
+                        config.v2_inventory_page_limit,
+                    )))
                 };
                 let shared = Shared {
                     meta_server_collect: meta_servers,
@@ -210,6 +217,20 @@ impl KVServer {
                     v2_state,
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
+                if let Some(v2_state) = shared.v2_state.clone() {
+                    let active_sequences = Arc::clone(&shared.active_squence);
+                    let maintenance_interval = Duration::from_millis(
+                        shared.config.v2_maintenance_interval_ms,
+                    );
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(maintenance_interval);
+                        loop {
+                            interval.tick().await;
+                            v2_state.cleanup_expired();
+                            active_sequences.force_expiry();
+                        }
+                    });
+                }
                 Ok(KVServer { shared })
             },
             Err(e) => {

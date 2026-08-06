@@ -491,6 +491,8 @@ target backend 逐块状态生成建议：
 - 同 InstanceKey 新 epoch 注册后旧事件全部拒绝；
 - sync 失败不会污染 live index，也不会无限 freeze cache store。
 
+阶段 D 实施记录（2026-08-06）：D-01～D-09 已落入代码。CEDFS 为每个 epoch 签发 lease，后台按 TTL 清理实例、副本、staging sync 和请求；heartbeat 携带 meta generation，并在重启或 inventory 未就绪时要求 full sync。inventory page 先进入 staging，逐页 checksum、总 checksum、页数、block 数和 base event sequence 全部通过后才原子替换 live index。LMCache V2 mutation 改为有界 reporter queue，同一 event sequence 做有限重试，queue overflow/sequence gap/meta restart 统一转入 ledger snapshot full sync；迁移 target 为保留权威 replica version 继续使用同步 mutation。请求标识使用 instance/worker/epoch/request_id 组合键，duplicate start 幂等，unknown end 不产生副作用，并按各自 deadline 清理。按仓库约束，本阶段只做静态检查，运行时故障注入门禁仍需在允许执行测试的环境验证。
+
 ### 5.5 阶段 E：迁移策略与调度稳定性
 
 目标：正确状态之上实现有容量约束、可收敛的复制策略。
