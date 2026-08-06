@@ -10,6 +10,7 @@ use chrono::Utc;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
 use cedfs_proto::kvcache_v2::kv_meta2_data_v2_server::KvMeta2DataV2Server;
+use cedfs_proto::lmcache_v2::{TransferKvV2Request, TransferKvV2Response};
 
 use crate::config::{Config, ProtocolMode};
 use crate::hash::{HashAlgorithm, TokenHasher};
@@ -19,7 +20,8 @@ use crate::network::kv_meta2data::KvCacheDataService;
 use crate::network::kv_meta2data_v2::KvCacheDataServiceV2;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::operation::transfer_kv::{
-    TransferKvOp, KV_TRANSFER_ALREADY_SATISFIED, KV_TRANSFER_FAILED, KV_TRANSFER_NOT_FOUND,
+    TransferKvOp, TransferV2Limits, KV_TRANSFER_ALREADY_SATISFIED, KV_TRANSFER_FAILED,
+    KV_TRANSFER_NOT_FOUND,
 };
 use crate::tokenizers::TokenizerManager;
 use crate::transfer::squnence::ActiveSequences;
@@ -270,6 +272,46 @@ impl KVServer {
 }
 
 impl Shared {
+    pub async fn execute_transfer_v2(
+        &self,
+        source_rpc_url: &str,
+        mut request: TransferKvV2Request,
+    ) -> anyhow::Result<TransferKvV2Response> {
+        if !self.config.enable_v2_transfer {
+            anyhow::bail!("V2 transfer is disabled");
+        }
+        if !request.do_copy {
+            anyhow::bail!("V2 transfer supports copy only");
+        }
+        let state = self
+            .v2_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("V2 state is unavailable"))?;
+        if request.deadline_unix_ms == 0 {
+            request.deadline_unix_ms = Utc::now().timestamp_millis() as u64
+                + self.config.v2_transfer_rpc_timeout_ms;
+        }
+        let client = TransferKvOp::new(source_rpc_url);
+        let response = client
+            .send_transfer_requests_v2(
+                request.clone(),
+                TransferV2Limits {
+                    max_blocks: self.config.v2_transfer_max_blocks,
+                    max_tokens: self.config.v2_transfer_max_tokens,
+                    max_bytes: self.config.v2_transfer_max_bytes,
+                    estimated_bytes_per_token: KV_CACHE_BYTES_PER_TOKEN as u64,
+                    timeout: Duration::from_millis(
+                        self.config.v2_transfer_rpc_timeout_ms,
+                    ),
+                },
+            )
+            .await?;
+        state
+            .commit_transfer_results(&request, &response.results)
+            .map_err(anyhow::Error::msg)?;
+        Ok(response)
+    }
+
     pub fn launch_metrics_reporter(&self) {
         let Some(collector) = self.metrics_collector.clone() else {
             return;

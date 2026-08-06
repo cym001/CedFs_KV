@@ -97,6 +97,11 @@ pub struct Config {
 
     // V2 主动迁移独立开关；阶段 A 默认关闭。
     pub enable_v2_transfer: bool,
+
+    pub v2_transfer_max_blocks: usize,
+    pub v2_transfer_max_tokens: u64,
+    pub v2_transfer_max_bytes: u64,
+    pub v2_transfer_rpc_timeout_ms: u64,
 }
 
 impl Config {
@@ -192,6 +197,14 @@ impl Config {
                 .unwrap_or_else(|_| "v1".to_string()),
         )?;
         let enable_v2_transfer = config.get::<bool>("enable_v2_transfer").unwrap_or(false);
+        let v2_transfer_max_blocks = config.get("v2_transfer_max_blocks").unwrap_or(128);
+        let v2_transfer_max_tokens = config.get("v2_transfer_max_tokens").unwrap_or(32_768);
+        let v2_transfer_max_bytes = config
+            .get("v2_transfer_max_bytes")
+            .unwrap_or(4_u64 * 1024 * 1024 * 1024);
+        let v2_transfer_rpc_timeout_ms = config
+            .get("v2_transfer_rpc_timeout_ms")
+            .unwrap_or(5_000);
 
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -216,6 +229,15 @@ impl Config {
         if enable_v2_transfer && protocol_mode == ProtocolMode::V1 {
             return Err(ConfigError::BuildError(
                 "enable_v2_transfer requires protocol_mode dual_shadow or v2".to_string(),
+            ));
+        }
+        if v2_transfer_max_blocks == 0
+            || v2_transfer_max_tokens == 0
+            || v2_transfer_max_bytes == 0
+            || v2_transfer_rpc_timeout_ms == 0
+        {
+            return Err(ConfigError::BuildError(
+                "V2 transfer limits and timeout must be greater than 0".to_string(),
             ));
         }
 
@@ -244,6 +266,10 @@ impl Config {
             .enable_metrics(enable_metrics)
             .protocol_mode(protocol_mode)
             .enable_v2_transfer(enable_v2_transfer)
+            .v2_transfer_max_blocks(v2_transfer_max_blocks)
+            .v2_transfer_max_tokens(v2_transfer_max_tokens)
+            .v2_transfer_max_bytes(v2_transfer_max_bytes)
+            .v2_transfer_rpc_timeout_ms(v2_transfer_rpc_timeout_ms)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

@@ -11,6 +11,9 @@ use cedfs_proto::kvcache_v2::{
     MutationStatusV2, RegisterInstanceV2Request, RegisterInstanceV2Response, RegisterStatusV2,
     ReportCacheMutationsV2Request, ReportCacheMutationsV2Response,
 };
+use cedfs_proto::lmcache_v2::{
+    BlockTransferResultV2, BlockTransferStatusV2, TransferKvV2Request,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstanceKey {
@@ -31,6 +34,7 @@ pub struct InstanceRecord {
 pub struct ShadowBlock {
     pub descriptor: BlockDescriptorV2,
     pub replicas: HashMap<u64, u64>,
+    pub last_versions: HashMap<u64, u64>,
 }
 
 #[derive(Debug, Default)]
@@ -258,6 +262,98 @@ impl V2State {
             error_detail: String::new(),
         }
     }
+
+    /// Atomically validate a V2 response and commit only authoritative block results.
+    pub fn commit_transfer_results(
+        &self,
+        request: &TransferKvV2Request,
+        results: &[BlockTransferResultV2],
+    ) -> Result<usize, String> {
+        if request.blocks.len() != results.len() {
+            return Err("transfer response cardinality mismatch".to_string());
+        }
+        if request
+            .blocks
+            .iter()
+            .zip(results)
+            .any(|(block, result)| block.seq_hash != result.seq_hash)
+        {
+            return Err("transfer response order/hash mismatch".to_string());
+        }
+        let source = self.resolve_transfer_instance(request.source.as_ref())?;
+        let target = self.resolve_transfer_instance(request.target.as_ref())?;
+        if source.group_id != request.compatibility_group_id
+            || target.group_id != request.compatibility_group_id
+        {
+            return Err("transfer instance is outside compatibility group".to_string());
+        }
+        let group = self
+            .groups
+            .get(&request.compatibility_group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| "compatibility group is unknown".to_string())?;
+        let mut blocks = group.blocks.lock().unwrap();
+        let mut committed = 0;
+        for (descriptor, result) in request.blocks.iter().zip(results) {
+            let status = BlockTransferStatusV2::try_from(result.status)
+                .map_err(|_| "unknown block transfer status".to_string())?;
+            match status {
+                BlockTransferStatusV2::Copied
+                | BlockTransferStatusV2::AlreadyPresent => {
+                    if result.target_replica_version == 0 {
+                        continue;
+                    }
+                    let Some(block) = blocks.get_mut(&descriptor.seq_hash) else {
+                        continue;
+                    };
+                    if !same_descriptor(&block.descriptor, descriptor) {
+                        return Err("transfer descriptor conflicts with shadow block".to_string());
+                    }
+                    let last_version = block
+                        .last_versions
+                        .get(&target.handle)
+                        .copied()
+                        .unwrap_or(0);
+                    if result.target_replica_version < last_version {
+                        continue;
+                    }
+                    block
+                        .last_versions
+                        .insert(target.handle, result.target_replica_version);
+                    block
+                        .replicas
+                        .insert(target.handle, result.target_replica_version);
+                    committed += 1;
+                },
+                BlockTransferStatusV2::SourceMissing => {
+                    if let Some(block) = blocks.get_mut(&descriptor.seq_hash) {
+                        block.replicas.remove(&source.handle);
+                    }
+                },
+                _ => {},
+            }
+        }
+        Ok(committed)
+    }
+
+    fn resolve_transfer_instance(
+        &self,
+        identity: Option<&InstanceIdentityV2>,
+    ) -> Result<InstanceRecord, String> {
+        let identity = identity.ok_or_else(|| "missing transfer identity".to_string())?;
+        let key = parse_instance_key(identity)
+            .ok_or_else(|| "invalid transfer identity".to_string())?;
+        let record = self
+            .instances
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| "transfer instance is not registered".to_string())?;
+        let record = record.lock().unwrap();
+        if record.epoch != identity.epoch {
+            return Err("stale transfer instance epoch".to_string());
+        }
+        Ok(record.clone())
+    }
 }
 
 fn apply_event(
@@ -281,15 +377,17 @@ fn apply_event(
                         return Err("descriptor conflicts with existing group block".to_string());
                     }
                 }
-                available.insert(descriptor.seq_hash.clone());
-                blocks
-                    .entry(descriptor.seq_hash.clone())
+                let seq_hash = descriptor.seq_hash.clone();
+                available.insert(seq_hash.clone());
+                let block = blocks
+                    .entry(seq_hash)
                     .or_insert_with(|| ShadowBlock {
                         descriptor,
                         replicas: HashMap::new(),
-                    })
-                    .replicas
-                    .insert(instance_handle, event_seq);
+                        last_versions: HashMap::new(),
+                    });
+                block.last_versions.insert(instance_handle, event_seq);
+                block.replicas.insert(instance_handle, event_seq);
             }
         },
         Some(Payload::Remove(remove)) => {
@@ -297,14 +395,9 @@ fn apply_event(
                 if seq_hash.len() != 32 {
                     return Err("removed seq_hash must be exactly 32 bytes".to_string());
                 }
-                let should_remove = if let Some(block) = blocks.get_mut(&seq_hash) {
+                if let Some(block) = blocks.get_mut(&seq_hash) {
                     block.replicas.remove(&instance_handle);
-                    block.replicas.is_empty()
-                } else {
-                    false
-                };
-                if should_remove {
-                    blocks.remove(&seq_hash);
+                    block.last_versions.insert(instance_handle, event_seq);
                 }
             }
         },
@@ -383,9 +476,6 @@ fn fingerprint_group_id(fingerprint: &CompatibilityFingerprintV2) -> Vec<u8> {
         fingerprint.tensor_parallel_size as u64,
         fingerprint.pipeline_parallel_size as u64,
         fingerprint.world_size as u64,
-        fingerprint.worker_id as u64,
-        fingerprint.tensor_parallel_rank as u64,
-        fingerprint.pipeline_parallel_rank as u64,
     ] {
         hasher.update(value.to_be_bytes());
     }
@@ -402,6 +492,7 @@ fn remove_instance_replicas(group: &GroupState, instance_handle: u64) {
     let mut blocks = group.blocks.lock().unwrap();
     blocks.retain(|_, block| {
         block.replicas.remove(&instance_handle);
+        block.last_versions.remove(&instance_handle);
         !block.replicas.is_empty()
     });
 }
@@ -446,8 +537,10 @@ fn mutation_error(
 mod tests {
     use super::*;
     use cedfs_proto::kvcache_v2::{
-        CacheMutationEventV2, InstanceEndpointsV2, InstanceSessionV2, StoreBlocksV2,
+        CacheMutationEventV2, InstanceEndpointsV2, InstanceSessionV2, RemoveBlocksV2,
+        StoreBlocksV2,
     };
+    use cedfs_proto::lmcache_v2::{BlockTransferResultV2, TransferKvV2Request};
 
     fn identity(instance_id: &str, worker_id: u32, epoch: &str) -> InstanceIdentityV2 {
         InstanceIdentityV2 {
@@ -512,6 +605,27 @@ mod tests {
             offset: 4,
             token_ids: vec![1, 2, 3, 4],
             ..Default::default()
+        }
+    }
+
+    fn remove_request(
+        instance_id: &str,
+        group_id: Vec<u8>,
+        event_seq: u64,
+        seq_hash: Vec<u8>,
+    ) -> ReportCacheMutationsV2Request {
+        ReportCacheMutationsV2Request {
+            session: Some(InstanceSessionV2 {
+                instance: Some(identity(instance_id, 0, "epoch-1")),
+                lease_id: String::new(),
+            }),
+            compatibility_group_id: group_id,
+            events: vec![CacheMutationEventV2 {
+                event_seq,
+                payload: Some(Payload::Remove(RemoveBlocksV2 {
+                    seq_hashes: vec![seq_hash],
+                })),
+            }],
         }
     }
 
@@ -582,5 +696,121 @@ mod tests {
             descriptor,
         ));
         assert_eq!(response.status, MutationStatusV2::InvalidDescriptor as i32);
+    }
+
+    #[test]
+    fn transfer_commits_only_successful_blocks() {
+        let state = V2State::default();
+        let source_registration = state.register(register_request("source", "model-a"));
+        let target_registration = state.register(register_request("target", "model-a"));
+        assert_eq!(
+            source_registration.compatibility_group_id,
+            target_registration.compatibility_group_id
+        );
+        let descriptors: Vec<_> = (1..=5).map(root_descriptor).collect();
+        let mut source_store = store_request(
+            "source",
+            source_registration.compatibility_group_id.clone(),
+            1,
+            descriptors[0].clone(),
+        );
+        source_store.events[0].payload = Some(Payload::Store(StoreBlocksV2 {
+            blocks: descriptors.clone(),
+        }));
+        assert_eq!(
+            state.report_mutations(source_store).status,
+            MutationStatusV2::Committed as i32
+        );
+        let request = TransferKvV2Request {
+            transfer_id: "partial".to_string(),
+            compatibility_group_id: source_registration.compatibility_group_id.clone(),
+            source: Some(identity("source", 0, "epoch-1")),
+            target: Some(identity("target", 0, "epoch-1")),
+            blocks: descriptors.clone(),
+            do_copy: true,
+            ..Default::default()
+        };
+        let statuses = [
+            BlockTransferStatusV2::Copied,
+            BlockTransferStatusV2::AlreadyPresent,
+            BlockTransferStatusV2::TargetNoCapacity,
+            BlockTransferStatusV2::ReadFailed,
+            BlockTransferStatusV2::NotAttempted,
+        ];
+        let results: Vec<_> = descriptors
+            .iter()
+            .zip(statuses)
+            .map(|(block, status)| BlockTransferResultV2 {
+                seq_hash: block.seq_hash.clone(),
+                status: status as i32,
+                target_replica_version: 1,
+                ..Default::default()
+            })
+            .collect();
+
+        assert_eq!(state.commit_transfer_results(&request, &results), Ok(2));
+        let target_handle = state
+            .instances
+            .get(&InstanceKey {
+                lmcache_instance_id: "target".to_string(),
+                worker_id: 0,
+            })
+            .unwrap()
+            .lock()
+            .unwrap()
+            .handle;
+        let group = state.groups.get(&request.compatibility_group_id).unwrap();
+        let blocks = group.blocks.lock().unwrap();
+        assert!(blocks[&descriptors[0].seq_hash]
+            .replicas
+            .contains_key(&target_handle));
+        assert!(blocks[&descriptors[1].seq_hash]
+            .replicas
+            .contains_key(&target_handle));
+        assert!(!blocks[&descriptors[2].seq_hash]
+            .replicas
+            .contains_key(&target_handle));
+    }
+
+    #[test]
+    fn newer_target_remove_rejects_stale_transfer_result() {
+        let state = V2State::default();
+        let source = state.register(register_request("source", "model-a"));
+        state.register(register_request("target", "model-a"));
+        let descriptor = root_descriptor(9);
+        state.report_mutations(store_request(
+            "source",
+            source.compatibility_group_id.clone(),
+            1,
+            descriptor.clone(),
+        ));
+        state.report_mutations(store_request(
+            "target",
+            source.compatibility_group_id.clone(),
+            1,
+            descriptor.clone(),
+        ));
+        state.report_mutations(remove_request(
+            "target",
+            source.compatibility_group_id.clone(),
+            2,
+            descriptor.seq_hash.clone(),
+        ));
+        let request = TransferKvV2Request {
+            compatibility_group_id: source.compatibility_group_id.clone(),
+            source: Some(identity("source", 0, "epoch-1")),
+            target: Some(identity("target", 0, "epoch-1")),
+            blocks: vec![descriptor.clone()],
+            do_copy: true,
+            ..Default::default()
+        };
+        let result = BlockTransferResultV2 {
+            seq_hash: descriptor.seq_hash.clone(),
+            status: BlockTransferStatusV2::Copied as i32,
+            target_replica_version: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(state.commit_transfer_results(&request, &[result]), Ok(0));
     }
 }

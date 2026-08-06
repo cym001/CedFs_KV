@@ -1,5 +1,9 @@
 use cedfs_proto::lmcache::lmcache_server_client::LmcacheServerClient;
 use cedfs_proto::lmcache::{TransferKvRequest, TransferKvResponse};
+use cedfs_proto::lmcache_v2::lmcache_server_v2_client::LmcacheServerV2Client;
+use cedfs_proto::lmcache_v2::{TransferKvV2Request, TransferKvV2Response};
+use std::time::Duration;
+use tonic::Request;
 
 pub const KV_TRANSFER_NOT_FOUND: i32 = -1;
 pub const KV_TRANSFER_FAILED: i32 = -2;
@@ -15,6 +19,15 @@ pub const KV_TRANSFER_ALREADY_SATISFIED: i32 = 2_147_483_647;
 
 pub struct TransferKvOp {
     base_url: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransferV2Limits {
+    pub max_blocks: usize,
+    pub max_tokens: u64,
+    pub max_bytes: u64,
+    pub estimated_bytes_per_token: u64,
+    pub timeout: Duration,
 }
 
 impl TransferKvOp {
@@ -53,5 +66,71 @@ impl TransferKvOp {
         let response = client.transfer_kv(request_body).await?;
 
         Ok(response.into_inner())
+    }
+
+    pub async fn send_transfer_request_v2(
+        &self,
+        request_body: TransferKvV2Request,
+        timeout: Duration,
+    ) -> Result<TransferKvV2Response, anyhow::Error> {
+        let mut client = LmcacheServerV2Client::connect(self.base_url.clone()).await?;
+        let mut request = Request::new(request_body);
+        request.set_timeout(timeout);
+        Ok(client.transfer_kv_v2(request).await?.into_inner())
+    }
+
+    /// Split a logical transfer without changing block order or response cardinality.
+    pub async fn send_transfer_requests_v2(
+        &self,
+        request: TransferKvV2Request,
+        limits: TransferV2Limits,
+    ) -> Result<TransferKvV2Response, anyhow::Error> {
+        if limits.max_blocks == 0
+            || limits.max_tokens == 0
+            || limits.max_bytes == 0
+            || limits.estimated_bytes_per_token == 0
+        {
+            anyhow::bail!("V2 transfer limits must be non-zero");
+        }
+        let transfer_id = request.transfer_id.clone();
+        let mut all_results = Vec::with_capacity(request.blocks.len());
+        let mut start = 0;
+        while start < request.blocks.len() {
+            let mut end = start;
+            let mut tokens = 0_u64;
+            let mut bytes = 0_u64;
+            while end < request.blocks.len() && end - start < limits.max_blocks {
+                let next_tokens = u64::from(request.blocks[end].offset);
+                let next_bytes = next_tokens
+                    .checked_mul(limits.estimated_bytes_per_token)
+                    .ok_or_else(|| anyhow::anyhow!("V2 transfer byte estimate overflow"))?;
+                if end > start
+                    && (tokens + next_tokens > limits.max_tokens
+                        || bytes + next_bytes > limits.max_bytes)
+                {
+                    break;
+                }
+                if next_tokens > limits.max_tokens || next_bytes > limits.max_bytes {
+                    anyhow::bail!("one V2 block exceeds transfer limits");
+                }
+                tokens += next_tokens;
+                bytes += next_bytes;
+                end += 1;
+            }
+            let mut page = request.clone();
+            page.blocks = request.blocks[start..end].to_vec();
+            let response = self
+                .send_transfer_request_v2(page, limits.timeout)
+                .await?;
+            if response.transfer_id != transfer_id || response.results.len() != end - start {
+                anyhow::bail!("invalid V2 transfer response identity/cardinality");
+            }
+            all_results.extend(response.results);
+            start = end;
+        }
+        Ok(TransferKvV2Response {
+            transfer_id,
+            results: all_results,
+        })
     }
 }

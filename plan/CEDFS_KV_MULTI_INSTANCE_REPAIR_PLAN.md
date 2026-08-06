@@ -459,6 +459,8 @@ target backend 逐块状态生成建议：
 
 阶段门禁：故障注入覆盖 0%、部分、100%、already-present、target-full、target-evict-race；CEDFS 与 target inventory 最终一致。
 
+阶段 C 实施记录（2026-08-06）：C-01～C-07 已落入代码。LMCache 的 PUT、worker 和 V2 gRPC 均保留逐块有序结果；target STORE mutation 的提交序号作为 `target_replica_version`。CEDFS 对响应基数、顺序、hash、instance epoch 和 compatibility group 做校验，只提交 `COPIED/ALREADY_PRESENT`，并以每实例 `last_versions` 阻止旧 transfer 覆盖较新的 REMOVE。V2 client 同时实施 block/token/估算 byte 分页和 RPC deadline。按仓库开发约束，本阶段仅完成静态检查；故障注入门禁留待允许执行构建与测试的环境验证。
+
 ### 5.4 阶段 D：实例生命周期、异步 reporter 和恢复
 
 目标：实例/meta 重启和网络抖动后自动恢复，meta 不阻断推理。
