@@ -9,12 +9,14 @@ use tracing::info;
 use chrono::Utc;
 use cedfs_proto::kvcache::kv_meta2_data_server::KvMeta2DataServer;
 use cedfs_proto::kvcache::kv_meta2_meta_server::KvMeta2MetaServer;
+use cedfs_proto::kvcache_v2::kv_meta2_data_v2_server::KvMeta2DataV2Server;
 
-use crate::config::Config;
+use crate::config::{Config, ProtocolMode};
 use crate::hash::{HashAlgorithm, TokenHasher};
 use crate::kv_radix::KvRadixTree;
 use crate::metrics::{MetricsCollector, MigrationSelectionRecord, ReplicationRpcRecord};
 use crate::network::kv_meta2data::KvCacheDataService;
+use crate::network::kv_meta2data_v2::KvCacheDataServiceV2;
 use crate::network::kv_meta2meta::KvCacheMetaService;
 use crate::operation::transfer_kv::{
     TransferKvOp, KV_TRANSFER_ALREADY_SATISFIED, KV_TRANSFER_FAILED, KV_TRANSFER_NOT_FOUND,
@@ -220,12 +222,40 @@ impl KVServer {
             shared: self.shared.clone(),
         });
 
-        tonic::transport::Server::builder()
-            .add_service(meta_server)
-            .add_service(data_server)
-            .serve(format!("{}:{}", ip, port).parse().unwrap())
-            .await
-            .unwrap();
+        let address = format!("{}:{}", ip, port).parse().unwrap();
+        match self.shared.config.protocol_mode {
+            ProtocolMode::V1 => {
+                tonic::transport::Server::builder()
+                    .add_service(meta_server)
+                    .add_service(data_server)
+                    .serve(address)
+                    .await
+                    .unwrap();
+            },
+            ProtocolMode::DualShadow => {
+                let data_server_v2 = KvMeta2DataV2Server::new(KvCacheDataServiceV2 {
+                    shared: self.shared.clone(),
+                });
+                tonic::transport::Server::builder()
+                    .add_service(meta_server)
+                    .add_service(data_server)
+                    .add_service(data_server_v2)
+                    .serve(address)
+                    .await
+                    .unwrap();
+            },
+            ProtocolMode::V2 => {
+                let data_server_v2 = KvMeta2DataV2Server::new(KvCacheDataServiceV2 {
+                    shared: self.shared.clone(),
+                });
+                tonic::transport::Server::builder()
+                    .add_service(meta_server)
+                    .add_service(data_server_v2)
+                    .serve(address)
+                    .await
+                    .unwrap();
+            },
+        }
     }
 }
 

@@ -5,6 +5,26 @@ use derive_builder::Builder;
 
 use crate::MetaServer;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolMode {
+    V1,
+    DualShadow,
+    V2,
+}
+
+impl ProtocolMode {
+    fn parse(value: &str) -> Result<Self, ConfigError> {
+        match value {
+            "v1" => Ok(Self::V1),
+            "dual_shadow" | "dual-shadow" => Ok(Self::DualShadow),
+            "v2" => Ok(Self::V2),
+            _ => Err(ConfigError::BuildError(format!(
+                "protocol_mode must be one of v1, dual_shadow, v2; got {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Builder)]
 pub struct Config {
     pub loaded_config: config::Config,
@@ -71,6 +91,12 @@ pub struct Config {
 
     // 是否开启 metrics 定时统计
     pub enable_metrics: bool,
+
+    // GlobalKV 控制面协议。默认保留 V1 行为。
+    pub protocol_mode: ProtocolMode,
+
+    // V2 主动迁移独立开关；阶段 A 默认关闭。
+    pub enable_v2_transfer: bool,
 }
 
 impl Config {
@@ -160,6 +186,12 @@ impl Config {
         let enable_metrics: bool = config
             .get("enable_metrics")
             .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
+        let protocol_mode = ProtocolMode::parse(
+            &config
+                .get::<String>("protocol_mode")
+                .unwrap_or_else(|_| "v1".to_string()),
+        )?;
+        let enable_v2_transfer = config.get::<bool>("enable_v2_transfer").unwrap_or(false);
 
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -179,6 +211,11 @@ impl Config {
         if !matches!(migration_network_bandwidth_mbps, 500 | 1000 | 10000) {
             return Err(ConfigError::BuildError(
                 "migration_network_bandwidth_mbps must be one of 500, 1000, 10000".to_string(),
+            ));
+        }
+        if enable_v2_transfer && protocol_mode == ProtocolMode::V1 {
+            return Err(ConfigError::BuildError(
+                "enable_v2_transfer requires protocol_mode dual_shadow or v2".to_string(),
             ));
         }
 
@@ -205,6 +242,8 @@ impl Config {
             .migration_check_request_interval(migration_check_request_interval)
             .migration_network_bandwidth_mbps(migration_network_bandwidth_mbps)
             .enable_metrics(enable_metrics)
+            .protocol_mode(protocol_mode)
+            .enable_v2_transfer(enable_v2_transfer)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

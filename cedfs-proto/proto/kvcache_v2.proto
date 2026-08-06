@@ -1,0 +1,238 @@
+syntax = "proto3";
+
+package kvcache.v2;
+
+// V2 is additive. The kvcache.KvMeta2Data V1 service and all of its messages
+// remain unchanged while clients are migrated through dual-shadow mode.
+service KvMeta2DataV2 {
+    rpc GetCapabilities(GetCapabilitiesRequestV2) returns (GetCapabilitiesResponseV2);
+    rpc RegisterInstance(RegisterInstanceV2Request) returns (RegisterInstanceV2Response);
+    rpc Heartbeat(HeartbeatV2Request) returns (HeartbeatV2Response);
+    rpc UnregisterInstance(UnregisterInstanceV2Request) returns (UnregisterInstanceV2Response);
+    rpc ReportCacheMutations(ReportCacheMutationsV2Request) returns (ReportCacheMutationsV2Response);
+    rpc BeginInventorySync(BeginInventorySyncV2Request) returns (BeginInventorySyncV2Response);
+    rpc UploadInventoryPage(UploadInventoryPageV2Request) returns (UploadInventoryPageV2Response);
+    rpc CommitInventorySync(CommitInventorySyncV2Request) returns (CommitInventorySyncV2Response);
+    rpc AbortInventorySync(AbortInventorySyncV2Request) returns (AbortInventorySyncV2Response);
+    rpc ReportRequestStart(ReportRequestStartV2Request) returns (ReportRequestV2Response);
+    rpc ReportRequestEnd(ReportRequestEndV2Request) returns (ReportRequestV2Response);
+}
+
+message GetCapabilitiesRequestV2 {}
+
+message GetCapabilitiesResponseV2 {
+    uint32 protocol_major = 1;
+    uint32 protocol_minor = 2;
+    repeated string capabilities = 3;
+    bool transfer_enabled = 4;
+    bytes descriptor_sha256 = 5;
+}
+
+message InstanceKeyV2 {
+    string lmcache_instance_id = 1;
+    uint32 worker_id = 2;
+}
+
+message InstanceIdentityV2 {
+    InstanceKeyV2 key = 1;
+    string epoch = 2;
+}
+
+message InstanceEndpointsV2 {
+    string host = 1;
+    uint32 http_port = 2;
+    uint32 nixl_init_port = 3;
+    uint32 transfer_rpc_port = 4;
+    string api_path = 5;
+}
+
+message CompatibilityFingerprintV2 {
+    string model_name = 1;
+    string model_revision = 2;
+    string tokenizer_name = 3;
+    string tokenizer_revision = 4;
+    string hash_algorithm = 5;
+    uint64 hash_seed = 6;
+    string python_hash_seed = 7;
+    uint32 chunk_size = 8;
+    bool save_unfull_chunk = 9;
+    string kv_dtype = 10;
+    string kv_layout = 11;
+    uint32 tensor_parallel_size = 12;
+    uint32 pipeline_parallel_size = 13;
+    uint32 world_size = 14;
+    uint32 worker_id = 15;
+    uint32 tensor_parallel_rank = 16;
+    uint32 pipeline_parallel_rank = 17;
+    repeated string cache_key_tags = 18;
+}
+
+message RegisterInstanceV2Request {
+    uint32 protocol_major = 1;
+    uint32 protocol_minor = 2;
+    InstanceIdentityV2 instance = 3;
+    InstanceEndpointsV2 endpoints = 4;
+    CompatibilityFingerprintV2 fingerprint = 5;
+    uint64 capacity_bytes = 6;
+    uint64 used_bytes = 7;
+    string known_meta_generation = 8;
+}
+
+enum RegisterStatusV2 {
+    REGISTER_STATUS_V2_UNSPECIFIED = 0;
+    REGISTER_STATUS_V2_ACCEPTED = 1;
+    REGISTER_STATUS_V2_INCOMPATIBLE = 2;
+    REGISTER_STATUS_V2_UNSUPPORTED_PROTOCOL = 3;
+    REGISTER_STATUS_V2_INVALID_ARGUMENT = 4;
+}
+
+message RegisterInstanceV2Response {
+    RegisterStatusV2 status = 1;
+    string error_detail = 2;
+    bytes compatibility_group_id = 3;
+    uint64 instance_handle = 4;
+    string lease_id = 5;
+    uint64 lease_ttl_ms = 6;
+    string meta_generation = 7;
+    bool require_inventory_sync = 8;
+    uint32 protocol_minor = 9;
+    repeated string capabilities = 10;
+}
+
+message InstanceSessionV2 {
+    InstanceIdentityV2 instance = 1;
+    string lease_id = 2;
+}
+
+message CapacitySnapshotV2 {
+    uint64 capacity_bytes = 1;
+    uint64 used_bytes = 2;
+    uint64 eviction_count = 3;
+}
+
+message HeartbeatV2Request {
+    InstanceSessionV2 session = 1;
+    string known_meta_generation = 2;
+    CapacitySnapshotV2 capacity = 3;
+}
+
+message HeartbeatV2Response {
+    bool accepted = 1;
+    bool require_registration = 2;
+    bool require_inventory_sync = 3;
+    string meta_generation = 4;
+    uint64 lease_ttl_ms = 5;
+}
+
+message UnregisterInstanceV2Request { InstanceSessionV2 session = 1; }
+message UnregisterInstanceV2Response { bool accepted = 1; }
+
+message BlockDescriptorV2 {
+    bytes seq_hash = 1;
+    bytes parent_hash = 2;
+    uint32 position = 3;
+    uint32 offset = 4;
+    repeated uint32 token_ids = 5;
+}
+
+message StoreBlocksV2 { repeated BlockDescriptorV2 blocks = 1; }
+message RemoveBlocksV2 { repeated bytes seq_hashes = 1; }
+
+message CacheMutationEventV2 {
+    uint64 event_seq = 1;
+    oneof payload {
+        StoreBlocksV2 store = 2;
+        RemoveBlocksV2 remove = 3;
+    }
+}
+
+message ReportCacheMutationsV2Request {
+    InstanceSessionV2 session = 1;
+    bytes compatibility_group_id = 2;
+    repeated CacheMutationEventV2 events = 3;
+}
+
+enum MutationStatusV2 {
+    MUTATION_STATUS_V2_UNSPECIFIED = 0;
+    MUTATION_STATUS_V2_COMMITTED = 1;
+    MUTATION_STATUS_V2_DUPLICATE = 2;
+    MUTATION_STATUS_V2_SEQUENCE_GAP = 3;
+    MUTATION_STATUS_V2_STALE_EPOCH = 4;
+    MUTATION_STATUS_V2_STALE_LEASE = 5;
+    MUTATION_STATUS_V2_INVALID_DESCRIPTOR = 6;
+    MUTATION_STATUS_V2_WRONG_GROUP = 7;
+}
+
+message ReportCacheMutationsV2Response {
+    MutationStatusV2 status = 1;
+    uint64 committed_through_seq = 2;
+    uint64 expected_next_seq = 3;
+    bool require_inventory_sync = 4;
+    uint64 failed_event_seq = 5;
+    string error_detail = 6;
+}
+
+message BeginInventorySyncV2Request {
+    InstanceSessionV2 session = 1;
+    bytes compatibility_group_id = 2;
+    uint64 base_event_seq = 3;
+    uint64 total_blocks = 4;
+    uint32 total_pages = 5;
+    bytes inventory_checksum = 6;
+}
+
+message BeginInventorySyncV2Response {
+    bool accepted = 1;
+    string sync_id = 2;
+    uint32 page_size_limit = 3;
+    string error_detail = 4;
+}
+
+message UploadInventoryPageV2Request {
+    InstanceSessionV2 session = 1;
+    string sync_id = 2;
+    uint32 page_id = 3;
+    repeated BlockDescriptorV2 blocks = 4;
+    bytes page_checksum = 5;
+}
+
+message UploadInventoryPageV2Response {
+    bool accepted = 1;
+    uint32 page_id = 2;
+    string error_detail = 3;
+}
+
+message CommitInventorySyncV2Request {
+    InstanceSessionV2 session = 1;
+    string sync_id = 2;
+}
+
+message CommitInventorySyncV2Response {
+    bool committed = 1;
+    uint64 committed_event_seq = 2;
+    string error_detail = 3;
+}
+
+message AbortInventorySyncV2Request {
+    InstanceSessionV2 session = 1;
+    string sync_id = 2;
+}
+
+message AbortInventorySyncV2Response { bool aborted = 1; }
+
+message RequestIdentityV2 {
+    InstanceIdentityV2 instance = 1;
+    string request_id = 2;
+}
+
+message ReportRequestStartV2Request {
+    RequestIdentityV2 request = 1;
+    repeated BlockDescriptorV2 blocks = 2;
+}
+
+message ReportRequestEndV2Request { RequestIdentityV2 request = 1; }
+
+message ReportRequestV2Response {
+    bool accepted = 1;
+    bool duplicate = 2;
+}

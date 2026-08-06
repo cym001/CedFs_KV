@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package lmcache.v2;
+
+import "kvcache_v2.proto";
+
+service LmcacheServerV2 {
+    rpc TransferKvV2(TransferKvV2Request) returns (TransferKvV2Response);
+}
+
+message TransferKvV2Request {
+    string transfer_id = 1;
+    bytes compatibility_group_id = 2;
+    kvcache.v2.InstanceIdentityV2 source = 3;
+    kvcache.v2.InstanceIdentityV2 target = 4;
+    kvcache.v2.InstanceEndpointsV2 target_endpoints = 5;
+    repeated kvcache.v2.BlockDescriptorV2 blocks = 6;
+    bool do_copy = 7;
+    uint64 deadline_unix_ms = 8;
+}
+
+enum BlockTransferStatusV2 {
+    BLOCK_TRANSFER_STATUS_V2_UNSPECIFIED = 0;
+    BLOCK_TRANSFER_STATUS_V2_COPIED = 1;
+    BLOCK_TRANSFER_STATUS_V2_ALREADY_PRESENT = 2;
+    BLOCK_TRANSFER_STATUS_V2_SOURCE_MISSING = 3;
+    BLOCK_TRANSFER_STATUS_V2_TARGET_NO_CAPACITY = 4;
+    BLOCK_TRANSFER_STATUS_V2_READ_FAILED = 5;
+    BLOCK_TRANSFER_STATUS_V2_NOT_ATTEMPTED = 6;
+    BLOCK_TRANSFER_STATUS_V2_INCOMPATIBLE = 7;
+    BLOCK_TRANSFER_STATUS_V2_STALE_TARGET_EPOCH = 8;
+    BLOCK_TRANSFER_STATUS_V2_PROTOCOL_ERROR = 9;
+}
+
+message BlockTransferResultV2 {
+    bytes seq_hash = 1;
+    BlockTransferStatusV2 status = 2;
+    uint64 target_replica_version = 3;
+    uint64 bytes_transferred = 4;
+    string error_detail_code = 5;
+}
+
+message TransferKvV2Response {
+    string transfer_id = 1;
+    repeated BlockTransferResultV2 results = 2;
+}
