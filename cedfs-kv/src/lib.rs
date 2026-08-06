@@ -35,6 +35,7 @@ pub mod kv_radix;
 pub mod metrics;
 pub mod network;
 pub mod operation;
+pub mod state;
 pub mod tokenizers;
 pub mod transfer;
 
@@ -90,6 +91,9 @@ pub struct Shared {
     pub pressure_migration_request_count: Arc<AtomicU64>,
 
     pub metrics_collector: Option<Arc<MetricsCollector>>,
+
+    // V2 state exists only when protocol_mode enables the V2 service.
+    pub v2_state: Option<Arc<state::v2::V2State>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -182,6 +186,11 @@ impl KVServer {
                     None
                 };
 
+                let v2_state = if config.protocol_mode == ProtocolMode::V1 {
+                    None
+                } else {
+                    Some(Arc::new(state::v2::V2State::default()))
+                };
                 let shared = Shared {
                     meta_server_collect: meta_servers,
                     global_data_server_collect: Arc::new(DashMap::new()),
@@ -196,6 +205,7 @@ impl KVServer {
                     pressure_migration_next_allowed_at: Arc::new(DashMap::new()),
                     pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
                     metrics_collector,
+                    v2_state,
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 Ok(KVServer { shared })

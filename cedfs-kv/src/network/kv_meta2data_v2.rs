@@ -36,7 +36,11 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
         Ok(Response::new(GetCapabilitiesResponseV2 {
             protocol_major: PROTOCOL_MAJOR,
             protocol_minor: PROTOCOL_MINOR,
-            capabilities: vec!["capability_handshake".to_string()],
+            capabilities: vec![
+                "capability_handshake".to_string(),
+                "instance_registration".to_string(),
+                "cache_mutation_shadow".to_string(),
+            ],
             transfer_enabled: self.shared.config.enable_v2_transfer,
             descriptor_sha256: Sha256::digest(cedfs_proto::V2_DESCRIPTOR_SET).to_vec(),
         }))
@@ -44,9 +48,14 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
 
     async fn register_instance(
         &self,
-        _request: Request<RegisterInstanceV2Request>,
+        request: Request<RegisterInstanceV2Request>,
     ) -> Result<Response<RegisterInstanceV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self
+            .shared
+            .v2_state
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("V2 state is disabled"))?;
+        Ok(Response::new(state.register(request.into_inner())))
     }
 
     async fn heartbeat(
@@ -65,9 +74,14 @@ impl KvMeta2DataV2 for KvCacheDataServiceV2 {
 
     async fn report_cache_mutations(
         &self,
-        _request: Request<ReportCacheMutationsV2Request>,
+        request: Request<ReportCacheMutationsV2Request>,
     ) -> Result<Response<ReportCacheMutationsV2Response>, Status> {
-        phase_a_unimplemented()
+        let state = self
+            .shared
+            .v2_state
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("V2 state is disabled"))?;
+        Ok(Response::new(state.report_mutations(request.into_inner())))
     }
 
     async fn begin_inventory_sync(
