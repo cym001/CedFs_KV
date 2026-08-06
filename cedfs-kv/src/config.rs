@@ -106,6 +106,17 @@ pub struct Config {
     pub v2_request_ttl_ms: u64,
     pub v2_inventory_page_limit: u32,
     pub v2_maintenance_interval_ms: u64,
+    pub v2_demand_window_ms: u64,
+    pub v2_rebalance_interval_ms: u64,
+    pub v2_rebalance_reserve_bytes: u64,
+    pub v2_rebalance_bytes_per_token: u64,
+    pub v2_rebalance_max_replicas: usize,
+    pub v2_rebalance_min_benefit: f64,
+    pub v2_rebalance_max_evictions_per_second: f64,
+    pub v2_rebalance_target_max_usage_ratio: f64,
+    pub v2_rebalance_max_blocks: usize,
+    pub v2_source_target_concurrency: usize,
+    pub v2_network_concurrency: usize,
 }
 
 impl Config {
@@ -215,6 +226,37 @@ impl Config {
         let v2_maintenance_interval_ms = config
             .get("v2_maintenance_interval_ms")
             .unwrap_or(5_000);
+        let v2_demand_window_ms = config.get("v2_demand_window_ms").unwrap_or(300_000);
+        let v2_rebalance_interval_ms = config
+            .get("v2_rebalance_interval_ms")
+            .unwrap_or(5_000);
+        let v2_rebalance_reserve_bytes = config
+            .get("v2_rebalance_reserve_bytes")
+            .unwrap_or(512_u64 * 1024 * 1024);
+        let v2_rebalance_bytes_per_token = config
+            .get("v2_rebalance_bytes_per_token")
+            .unwrap_or(96_u64 * 1024);
+        let v2_rebalance_max_replicas = config
+            .get("v2_rebalance_max_replicas")
+            .unwrap_or(2);
+        let v2_rebalance_min_benefit = config
+            .get("v2_rebalance_min_benefit")
+            .unwrap_or(0.5);
+        let v2_rebalance_max_evictions_per_second = config
+            .get("v2_rebalance_max_evictions_per_second")
+            .unwrap_or(10.0);
+        let v2_rebalance_target_max_usage_ratio = config
+            .get("v2_rebalance_target_max_usage_ratio")
+            .unwrap_or(0.85);
+        let v2_rebalance_max_blocks = config
+            .get("v2_rebalance_max_blocks")
+            .unwrap_or(v2_transfer_max_blocks);
+        let v2_source_target_concurrency = config
+            .get("v2_source_target_concurrency")
+            .unwrap_or(1);
+        let v2_network_concurrency = config
+            .get("v2_network_concurrency")
+            .unwrap_or(4);
 
         if migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
@@ -249,15 +291,54 @@ impl Config {
             || v2_request_ttl_ms == 0
             || v2_inventory_page_limit == 0
             || v2_maintenance_interval_ms == 0
+            || v2_demand_window_ms == 0
+            || v2_rebalance_interval_ms == 0
+            || v2_rebalance_bytes_per_token == 0
+            || v2_rebalance_max_replicas == 0
+            || v2_rebalance_max_blocks == 0
+            || v2_source_target_concurrency == 0
+            || v2_network_concurrency == 0
         {
             return Err(ConfigError::BuildError(
-                "V2 transfer limits and timeout must be greater than 0".to_string(),
+                "V2 limits, intervals, and concurrency must be greater than 0".to_string(),
             ));
         }
         if v2_maintenance_interval_ms >= v2_lease_ttl_ms {
             return Err(ConfigError::BuildError(
                 "v2_maintenance_interval_ms must be less than v2_lease_ttl_ms"
                     .to_string(),
+            ));
+        }
+        if !v2_rebalance_min_benefit.is_finite() || v2_rebalance_min_benefit < 0.0 {
+            return Err(ConfigError::BuildError(
+                "v2_rebalance_min_benefit must be finite and non-negative".to_string(),
+            ));
+        }
+        if !v2_rebalance_max_evictions_per_second.is_finite()
+            || v2_rebalance_max_evictions_per_second < 0.0
+        {
+            return Err(ConfigError::BuildError(
+                "v2_rebalance_max_evictions_per_second must be finite and non-negative"
+                    .to_string(),
+            ));
+        }
+        if !v2_rebalance_target_max_usage_ratio.is_finite()
+            || v2_rebalance_target_max_usage_ratio <= 0.0
+            || v2_rebalance_target_max_usage_ratio >= 1.0
+        {
+            return Err(ConfigError::BuildError(
+                "v2_rebalance_target_max_usage_ratio must be between 0 and 1"
+                    .to_string(),
+            ));
+        }
+        if v2_rebalance_max_replicas < 2 {
+            return Err(ConfigError::BuildError(
+                "v2_rebalance_max_replicas must be at least 2".to_string(),
+            ));
+        }
+        if v2_rebalance_max_blocks > v2_transfer_max_blocks {
+            return Err(ConfigError::BuildError(
+                "v2_rebalance_max_blocks cannot exceed v2_transfer_max_blocks".to_string(),
             ));
         }
 
@@ -294,6 +375,21 @@ impl Config {
             .v2_request_ttl_ms(v2_request_ttl_ms)
             .v2_inventory_page_limit(v2_inventory_page_limit)
             .v2_maintenance_interval_ms(v2_maintenance_interval_ms)
+            .v2_demand_window_ms(v2_demand_window_ms)
+            .v2_rebalance_interval_ms(v2_rebalance_interval_ms)
+            .v2_rebalance_reserve_bytes(v2_rebalance_reserve_bytes)
+            .v2_rebalance_bytes_per_token(v2_rebalance_bytes_per_token)
+            .v2_rebalance_max_replicas(v2_rebalance_max_replicas)
+            .v2_rebalance_min_benefit(v2_rebalance_min_benefit)
+            .v2_rebalance_max_evictions_per_second(
+                v2_rebalance_max_evictions_per_second,
+            )
+            .v2_rebalance_target_max_usage_ratio(
+                v2_rebalance_target_max_usage_ratio,
+            )
+            .v2_rebalance_max_blocks(v2_rebalance_max_blocks)
+            .v2_source_target_concurrency(v2_source_target_concurrency)
+            .v2_network_concurrency(v2_network_concurrency)
             .build()
             .map_err(|e| ConfigError::BuildError(e.to_string()))?)
     }

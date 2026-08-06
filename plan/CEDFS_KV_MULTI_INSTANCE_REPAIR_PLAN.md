@@ -529,6 +529,8 @@ instance.state == READY
 
 阶段门禁：实例扩容时空节点能被预热；target 接近高水位时不再接收迁移；稳定流量下迁移率和 eviction rate 不持续振荡。
 
+阶段 E 实施记录（2026-08-06）：E-01～E-08 已落入代码。CEDFS 从 compatibility group 的 instance registry 枚举 READY 且 lease 有效的 source/target，空 inventory 实例也可作为预热目标；请求 demand 使用当前/上一固定时间桶计分，与 replica 数量和 eviction 彻底分离。LMCache heartbeat 从 LocalCPUBackend 上报 total/used bytes 与累计 eviction count，CEDFS 据此计算 eviction rate，并在候选阶段硬过滤容量为零、超过使用率高水位、驱逐率过高、reserve 不足或达到副本上限的 target。候选按预期收益/估算 byte cost 排序，仅迁移 source 完整持有的 root-to-leaf chain。后台调度对每个 group 合并 trigger、禁止同 group 并发，并允许不同 group 在 source、target 和全局网络 semaphore 预算内并行。新增静态单元测试覆盖空实例入选、高水位拒绝以及旧 demand 衰减。按仓库开发约束，本阶段仅完成静态检查；编译、测试与运行时稳定流量门禁需在允许执行项目代码的环境验证。
+
 ### 5.6 阶段 F：可观测性、配置、安全和收口
 
 目标：生产问题可发现、可诊断、可安全降级。

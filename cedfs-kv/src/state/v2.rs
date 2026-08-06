@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use sha2::{Digest, Sha256};
 
 use cedfs_proto::kvcache_v2::cache_mutation_event_v2::Payload;
@@ -30,6 +30,7 @@ pub struct InstanceKey {
 
 #[derive(Debug, Clone)]
 pub struct InstanceRecord {
+    pub key: InstanceKey,
     pub handle: u64,
     pub epoch: String,
     pub group_id: Vec<u8>,
@@ -39,6 +40,8 @@ pub struct InstanceRecord {
     pub lease_deadline: Instant,
     pub endpoints: InstanceEndpointsV2,
     pub capacity: CapacitySnapshotV2,
+    pub eviction_rate: f64,
+    pub capacity_updated_at: Instant,
     pub inventory_ready: bool,
 }
 
@@ -52,6 +55,26 @@ pub struct ShadowBlock {
 #[derive(Debug, Default)]
 pub struct GroupState {
     pub blocks: Mutex<HashMap<Vec<u8>, ShadowBlock>>,
+    demand: Mutex<HashMap<Vec<u8>, DemandWindow>>,
+}
+
+#[derive(Debug, Clone)]
+struct DemandWindow {
+    current: u64,
+    previous: u64,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct RebalanceCandidate {
+    pub group_id: Vec<u8>,
+    pub source: InstanceIdentityV2,
+    pub source_endpoints: InstanceEndpointsV2,
+    pub target: InstanceIdentityV2,
+    pub target_endpoints: InstanceEndpointsV2,
+    pub blocks: Vec<BlockDescriptorV2>,
+    pub demand_score: f64,
+    pub estimated_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -65,6 +88,7 @@ pub struct V2State {
     request_ttl: Duration,
     inventory_page_limit: u32,
     meta_generation: String,
+    demand_window: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -98,6 +122,20 @@ impl V2State {
         request_ttl: Duration,
         inventory_page_limit: u32,
     ) -> Self {
+        Self::new_with_demand_window(
+            lease_ttl,
+            request_ttl,
+            inventory_page_limit,
+            Duration::from_secs(300),
+        )
+    }
+
+    pub fn new_with_demand_window(
+        lease_ttl: Duration,
+        request_ttl: Duration,
+        inventory_page_limit: u32,
+        demand_window: Duration,
+    ) -> Self {
         let generation = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -112,6 +150,7 @@ impl V2State {
             request_ttl,
             inventory_page_limit,
             meta_generation: format!("{}-{generation}", std::process::id()),
+            demand_window,
         }
     }
 
@@ -182,18 +221,25 @@ impl V2State {
                     used_bytes: request.used_bytes,
                     eviction_count: 0,
                 };
+                existing.eviction_rate = 0.0;
+                existing.capacity_updated_at = Instant::now();
+                let generation_mismatch =
+                    request.known_meta_generation != self.meta_generation;
+                if generation_mismatch {
+                    existing.inventory_ready = false;
+                }
                 return register_success(
                     &existing,
                     self.lease_ttl,
                     &self.meta_generation,
-                    request.known_meta_generation != self.meta_generation
-                        || !existing.inventory_ready,
+                    generation_mismatch || !existing.inventory_ready,
                 );
             }
         }
         let handle = self.next_instance_handle.fetch_add(1, Ordering::Relaxed) + 1;
         let lease_id = format!("{}:{handle}", identity.epoch);
         let record = InstanceRecord {
+            key: key.clone(),
             handle,
             epoch: identity.epoch,
             group_id: group_id.clone(),
@@ -207,6 +253,8 @@ impl V2State {
                 used_bytes: request.used_bytes,
                 eviction_count: 0,
             },
+            eviction_rate: 0.0,
+            capacity_updated_at: Instant::now(),
             inventory_ready: false,
         };
 
@@ -250,13 +298,26 @@ impl V2State {
         let mut record = record.lock().unwrap();
         record.lease_deadline = Instant::now() + self.lease_ttl;
         if let Some(capacity) = request.capacity {
+            let elapsed = record.capacity_updated_at.elapsed().as_secs_f64();
+            let evictions = capacity
+                .eviction_count
+                .saturating_sub(record.capacity.eviction_count);
+            record.eviction_rate = if elapsed > 0.0 {
+                evictions as f64 / elapsed
+            } else {
+                0.0
+            };
             record.capacity = capacity;
+            record.capacity_updated_at = Instant::now();
+        }
+        let generation_mismatch = request.known_meta_generation != self.meta_generation;
+        if generation_mismatch {
+            record.inventory_ready = false;
         }
         HeartbeatV2Response {
             accepted: true,
             require_registration: false,
-            require_inventory_sync: request.known_meta_generation != self.meta_generation
-                || !record.inventory_ready,
+            require_inventory_sync: generation_mismatch || !record.inventory_ready,
             meta_generation: self.meta_generation.clone(),
             lease_ttl_ms: self.lease_ttl.as_millis() as u64,
         }
@@ -464,12 +525,13 @@ impl V2State {
         let Some(record) = self.instances.get(&instance) else {
             return ReportRequestV2Response::default();
         };
-        {
+        let group_id = {
             let record = record.lock().unwrap();
             if record.epoch != identity.epoch || record.lease_deadline <= Instant::now() {
                 return ReportRequestV2Response::default();
             }
-        }
+            record.group_id.clone()
+        };
         if request_identity.request_id.is_empty() {
             return ReportRequestV2Response::default();
         }
@@ -478,13 +540,34 @@ impl V2State {
             epoch: identity.epoch,
             request_id: request_identity.request_id,
         };
-        if self.requests.contains_key(&key) {
-            return ReportRequestV2Response {
-                accepted: true,
-                duplicate: true,
-            };
+        match self.requests.entry(key) {
+            Entry::Occupied(_) => {
+                return ReportRequestV2Response {
+                    accepted: true,
+                    duplicate: true,
+                };
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Instant::now() + self.request_ttl);
+            }
         }
-        self.requests.insert(key, Instant::now() + self.request_ttl);
+        if let Some(group) = self.groups.get(&group_id) {
+            let known_blocks = group.blocks.lock().unwrap();
+            let mut demand = group.demand.lock().unwrap();
+            for block in request.blocks {
+                if known_blocks.contains_key(&block.seq_hash) {
+                    let window = demand
+                        .entry(block.seq_hash)
+                        .or_insert_with(|| DemandWindow {
+                            current: 0,
+                            previous: 0,
+                            started_at: Instant::now(),
+                        });
+                    rotate_demand_window(window, self.demand_window);
+                    window.current = window.current.saturating_add(1);
+                }
+            }
+        }
         ReportRequestV2Response {
             accepted: true,
             duplicate: false,
@@ -547,6 +630,9 @@ impl V2State {
             }
         }
         self.cleanup_expired_requests();
+        for group in self.groups.iter() {
+            cleanup_expired_demand(group.value(), self.demand_window);
+        }
         removed_count
     }
 
@@ -573,6 +659,147 @@ impl V2State {
             }
         }
         Ok((key, record))
+    }
+
+    pub fn group_ids(&self) -> Vec<Vec<u8>> {
+        self.groups.iter().map(|entry| entry.key().clone()).collect()
+    }
+
+    pub fn select_rebalance_candidates(
+        &self,
+        group_id: &[u8],
+        reserve_bytes: u64,
+        bytes_per_token: u64,
+        max_replicas: usize,
+        min_benefit: f64,
+        max_evictions_per_second: f64,
+        target_max_usage_ratio: f64,
+        max_blocks: usize,
+    ) -> Vec<RebalanceCandidate> {
+        let now = Instant::now();
+        let instances: Vec<_> = self
+            .instances
+            .iter()
+            .filter_map(|entry| {
+                let record = entry.value().lock().unwrap();
+                (record.group_id == group_id
+                    && record.inventory_ready
+                    && record.lease_deadline > now)
+                    .then(|| record.clone())
+            })
+            .collect();
+        let Some(group) = self.groups.get(group_id) else {
+            return Vec::new();
+        };
+        let blocks = group.blocks.lock().unwrap();
+        let mut demand = group.demand.lock().unwrap();
+        let mut candidates = Vec::new();
+        for (seq_hash, block) in blocks.iter() {
+            if block.replicas.is_empty() || block.replicas.len() >= max_replicas {
+                continue;
+            }
+            let Some(window) = demand.get_mut(seq_hash) else {
+                continue;
+            };
+            rotate_demand_window(window, self.demand_window);
+            let score = window.current as f64 + 0.5 * window.previous as f64;
+            let replicas = block.replicas.len() as f64;
+            let benefit = score / replicas - score / (replicas + 1.0);
+            if benefit <= min_benefit {
+                continue;
+            }
+            let mut chain = Vec::new();
+            let mut current = block.descriptor.clone();
+            loop {
+                chain.push(current.clone());
+                if current.parent_hash.is_empty() {
+                    break;
+                }
+                let Some(parent) = blocks.get(&current.parent_hash) else {
+                    chain.clear();
+                    break;
+                };
+                current = parent.descriptor.clone();
+            }
+            if chain.is_empty() || chain.len() > max_blocks {
+                continue;
+            }
+            chain.reverse();
+            let Some(source) = instances.iter().find(|instance| {
+                chain.iter().all(|descriptor| {
+                    blocks.get(&descriptor.seq_hash).is_some_and(|entry| {
+                        entry.replicas.contains_key(&instance.handle)
+                    })
+                })
+            }) else {
+                continue;
+            };
+            let target = instances
+                .iter()
+                .filter(|instance| {
+                    !block.replicas.contains_key(&instance.handle)
+                        && instance.capacity.capacity_bytes > 0
+                        && instance.eviction_rate <= max_evictions_per_second
+                        && instance.capacity.used_bytes as f64
+                            / instance.capacity.capacity_bytes as f64
+                            <= target_max_usage_ratio
+                        && chain.iter().all(|descriptor| {
+                            blocks.get(&descriptor.seq_hash).is_some_and(|entry| {
+                                entry.replicas.contains_key(&instance.handle)
+                                    || entry.replicas.len() < max_replicas
+                            })
+                        })
+                })
+                .filter_map(|instance| {
+                    let missing_tokens: u64 = chain
+                        .iter()
+                        .filter(|descriptor| {
+                            blocks
+                                .get(&descriptor.seq_hash)
+                                .map_or(true, |entry| {
+                                    !entry.replicas.contains_key(&instance.handle)
+                                })
+                        })
+                        .map(|descriptor| u64::from(descriptor.offset))
+                        .sum();
+                    let estimated = missing_tokens.saturating_mul(bytes_per_token);
+                    let free = instance
+                        .capacity
+                        .capacity_bytes
+                        .saturating_sub(instance.capacity.used_bytes);
+                    (free >= estimated.saturating_add(reserve_bytes))
+                        .then_some((instance, estimated))
+                })
+                .max_by_key(|(instance, _)| {
+                    instance
+                        .capacity
+                        .capacity_bytes
+                        .saturating_sub(instance.capacity.used_bytes)
+                });
+            let Some((target, estimated_bytes)) = target else {
+                continue;
+            };
+            candidates.push(RebalanceCandidate {
+                group_id: group_id.to_vec(),
+                source: instance_identity(source),
+                source_endpoints: source.endpoints.clone(),
+                target: instance_identity(target),
+                target_endpoints: target.endpoints.clone(),
+                blocks: chain,
+                demand_score: benefit,
+                estimated_bytes,
+            });
+        }
+        candidates.sort_by(|left, right| {
+            let left_efficiency =
+                left.demand_score / left.estimated_bytes.max(1) as f64;
+            let right_efficiency =
+                right.demand_score / right.estimated_bytes.max(1) as f64;
+            right_efficiency
+                .total_cmp(&left_efficiency)
+                .then_with(|| left.estimated_bytes.cmp(&right.estimated_bytes))
+        });
+        candidates
     }
 
     pub fn report_mutations(
@@ -810,6 +1037,29 @@ fn apply_event(
     Ok(())
 }
 
+fn rotate_demand_window(window: &mut DemandWindow, duration: Duration) {
+    let elapsed = window.started_at.elapsed();
+    if elapsed >= duration.saturating_mul(2) {
+        window.previous = 0;
+        window.current = 0;
+        window.started_at = Instant::now();
+    } else if elapsed >= duration {
+        window.previous = window.current;
+        window.current = 0;
+        window.started_at += duration;
+    }
+}
+
+fn instance_identity(record: &InstanceRecord) -> InstanceIdentityV2 {
+    InstanceIdentityV2 {
+        key: Some(InstanceKeyV2 {
+            lmcache_instance_id: record.key.lmcache_instance_id.clone(),
+            worker_id: record.key.worker_id,
+        }),
+        epoch: record.epoch.clone(),
+    }
+}
+
 fn validate_descriptor(
     descriptor: &BlockDescriptorV2,
     chunk_size: u32,
@@ -895,6 +1145,15 @@ fn fingerprint_group_id(fingerprint: &CompatibilityFingerprintV2) -> Vec<u8> {
 fn remove_instance_replicas(group: &GroupState, instance_handle: u64) {
     let mut blocks = group.blocks.lock().unwrap();
     remove_instance_replicas_from_map(&mut blocks, instance_handle);
+}
+
+fn cleanup_expired_demand(group: &GroupState, duration: Duration) {
+    let retention = duration.saturating_mul(2);
+    group
+        .demand
+        .lock()
+        .unwrap()
+        .retain(|_, window| window.started_at.elapsed() < retention);
 }
 
 fn remove_instance_replicas_from_map(
@@ -1366,5 +1625,105 @@ mod tests {
                 }),
             })
             .accepted);
+    }
+
+    #[test]
+    fn rebalance_selects_ready_empty_target_with_capacity() {
+        let state = V2State::default();
+        let source = state.register(register_request("source", "model-a"));
+        let target = state.register(register_request("target", "model-a"));
+        mark_ready(&state, "source");
+        mark_ready(&state, "target");
+        let descriptor = root_descriptor(4);
+        state.report_mutations(store_request(
+            "source",
+            source.compatibility_group_id.clone(),
+            1,
+            descriptor.clone(),
+            &source.lease_id,
+        ));
+        assert!(state
+            .heartbeat(HeartbeatV2Request {
+                session: Some(session("target", &target.lease_id)),
+                capacity: Some(CapacitySnapshotV2 {
+                    capacity_bytes: 1_000_000,
+                    used_bytes: 0,
+                    eviction_count: 0,
+                }),
+                known_meta_generation: target.meta_generation.clone(),
+                ..Default::default()
+            })
+            .accepted);
+        state.report_request_start(ReportRequestStartV2Request {
+            request: Some(RequestIdentityV2 {
+                instance: Some(identity("source", 0, "epoch-1")),
+                request_id: "hot-request".to_string(),
+            }),
+            blocks: vec![descriptor],
+        });
+
+        let candidates = state.select_rebalance_candidates(
+            &source.compatibility_group_id,
+            0,
+            1,
+            2,
+            0.1,
+            10.0,
+            0.85,
+            16,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0]
+                .target
+                .key
+                .as_ref()
+                .unwrap()
+                .lmcache_instance_id,
+            "target"
+        );
+
+        assert!(state
+            .heartbeat(HeartbeatV2Request {
+                session: Some(session("target", &target.lease_id)),
+                capacity: Some(CapacitySnapshotV2 {
+                    capacity_bytes: 1_000_000,
+                    used_bytes: 900_000,
+                    eviction_count: 0,
+                }),
+                known_meta_generation: target.meta_generation,
+                ..Default::default()
+            })
+            .accepted);
+        assert!(state
+            .select_rebalance_candidates(
+                &source.compatibility_group_id,
+                0,
+                1,
+                2,
+                0.1,
+                10.0,
+                0.85,
+                16,
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn demand_window_decays_and_expires_old_heat() {
+        let duration = Duration::from_secs(10);
+        let mut window = DemandWindow {
+            current: 4,
+            previous: 2,
+            started_at: Instant::now() - duration,
+        };
+        rotate_demand_window(&mut window, duration);
+        assert_eq!(window.current, 0);
+        assert_eq!(window.previous, 4);
+
+        window.started_at = Instant::now() - duration.saturating_mul(2);
+        rotate_demand_window(&mut window, duration);
+        assert_eq!(window.current, 0);
+        assert_eq!(window.previous, 0);
     }
 }

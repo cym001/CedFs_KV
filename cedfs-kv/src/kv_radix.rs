@@ -532,20 +532,14 @@ impl KvRadixTree {
         seq_hash: BlockHash,
     ) -> Option<EvictionReport> {
         let node = self.node_for_hash(seq_hash)?;
-        let (heat_before, heat_after, replicas_before) = {
-            let mut block = node.write().expect("radix block poisoned");
+        let (heat_before, replicas_before) = {
+            let block = node.read().expect("radix block poisoned");
             if !block.servers.contains(&server_id) {
                 return None;
             }
             let replicas_before = block.servers.len() as u32;
             let heat_before = block.heat;
-            let shared_heat = if replicas_before == 0 {
-                0
-            } else {
-                heat_before / replicas_before as u64
-            };
-            block.heat = block.heat.saturating_sub(shared_heat);
-            (heat_before, block.heat, replicas_before)
+            (heat_before, replicas_before)
         };
 
         let removed = self.remove_server(seq_hash, server_id);
@@ -553,7 +547,7 @@ impl KvRadixTree {
             seq_hash,
             server_id,
             heat_before,
-            heat_after,
+            heat_after: heat_before,
             replica_count_before: replicas_before,
             replica_count_after: self.replica_count(seq_hash),
             removed,
@@ -972,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_eviction_subtracts_shared_heat() {
+    fn apply_eviction_preserves_demand_heat() {
         let index = KvRadixTree::new();
         let block = info(0, 10, 20, 4);
         index.store_blocks(1, std::slice::from_ref(&block));
@@ -984,7 +978,7 @@ mod tests {
         let report = index.apply_eviction(1, block.seq_hash).unwrap();
         assert!(report.removed);
         assert_eq!(report.heat_before, 6);
-        assert_eq!(report.heat_after, 3);
+        assert_eq!(report.heat_after, 6);
         assert_eq!(report.replica_count_before, 2);
         assert_eq!(report.replica_count_after, 1);
     }

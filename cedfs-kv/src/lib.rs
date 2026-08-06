@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use chrono::Utc;
@@ -96,6 +97,12 @@ pub struct Shared {
 
     // V2 state exists only when protocol_mode enables the V2 service.
     pub v2_state: Option<Arc<state::v2::V2State>>,
+
+    pub v2_instance_transfer_slots: Arc<DashMap<String, Arc<Semaphore>>>,
+
+    pub v2_network_slots: Arc<Semaphore>,
+
+    pub v2_rebalance_groups: Arc<DashSet<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -194,12 +201,16 @@ impl KVServer {
                 let v2_state = if config.protocol_mode == ProtocolMode::V1 {
                     None
                 } else {
-                    Some(Arc::new(state::v2::V2State::new(
+                    Some(Arc::new(state::v2::V2State::new_with_demand_window(
                         Duration::from_millis(config.v2_lease_ttl_ms),
                         Duration::from_millis(config.v2_request_ttl_ms),
                         config.v2_inventory_page_limit,
+                        Duration::from_millis(config.v2_demand_window_ms),
                     )))
                 };
+                let v2_network_slots = Arc::new(Semaphore::new(
+                    config.v2_network_concurrency,
+                ));
                 let shared = Shared {
                     meta_server_collect: meta_servers,
                     global_data_server_collect: Arc::new(DashMap::new()),
@@ -215,6 +226,9 @@ impl KVServer {
                     pressure_migration_request_count: Arc::new(AtomicU64::new(0)),
                     metrics_collector,
                     v2_state,
+                    v2_instance_transfer_slots: Arc::new(DashMap::new()),
+                    v2_network_slots,
+                    v2_rebalance_groups: Arc::new(DashSet::new()),
                 };
                 tracing::debug!("Loaded config: {:?}", shared.config);
                 if let Some(v2_state) = shared.v2_state.clone() {
@@ -229,6 +243,12 @@ impl KVServer {
                             v2_state.cleanup_expired();
                             active_sequences.force_expiry();
                         }
+                    });
+                }
+                if shared.config.enable_v2_transfer {
+                    let rebalance_shared = shared.clone();
+                    tokio::spawn(async move {
+                        rebalance_shared.run_v2_rebalance_worker().await;
                     });
                 }
                 Ok(KVServer { shared })
@@ -293,6 +313,112 @@ impl KVServer {
 }
 
 impl Shared {
+    async fn run_v2_rebalance_worker(self) {
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            self.config.v2_rebalance_interval_ms,
+        ));
+        loop {
+            interval.tick().await;
+            self.run_v2_rebalance_round().await;
+        }
+    }
+
+    async fn run_v2_rebalance_round(&self) {
+        let Some(state) = self.v2_state.as_ref() else {
+            return;
+        };
+        for group_id in state.group_ids() {
+            if !self.v2_rebalance_groups.insert(group_id.clone()) {
+                continue;
+            }
+            let Some(candidate) = state
+                .select_rebalance_candidates(
+                    &group_id,
+                    self.config.v2_rebalance_reserve_bytes,
+                    self.config.v2_rebalance_bytes_per_token,
+                    self.config.v2_rebalance_max_replicas,
+                    self.config.v2_rebalance_min_benefit,
+                    self.config.v2_rebalance_max_evictions_per_second,
+                    self.config.v2_rebalance_target_max_usage_ratio,
+                    self.config.v2_rebalance_max_blocks,
+                )
+                .into_iter()
+                .next()
+            else {
+                self.v2_rebalance_groups.remove(&group_id);
+                continue;
+            };
+            let source_key = transfer_slot_key(&candidate.source);
+            let target_key = transfer_slot_key(&candidate.target);
+            let source_slots = self
+                .v2_instance_transfer_slots
+                .entry(source_key)
+                .or_insert_with(|| {
+                    Arc::new(Semaphore::new(
+                        self.config.v2_source_target_concurrency,
+                    ))
+                })
+                .clone();
+            let target_slots = self
+                .v2_instance_transfer_slots
+                .entry(target_key)
+                .or_insert_with(|| {
+                    Arc::new(Semaphore::new(
+                        self.config.v2_source_target_concurrency,
+                    ))
+                })
+                .clone();
+            let Ok(_network_permit) = self.v2_network_slots.clone().try_acquire_owned() else {
+                self.v2_rebalance_groups.remove(&group_id);
+                continue;
+            };
+            let Ok(_source_permit) = source_slots.try_acquire_owned() else {
+                self.v2_rebalance_groups.remove(&group_id);
+                continue;
+            };
+            let Ok(_target_permit) = target_slots.try_acquire_owned() else {
+                self.v2_rebalance_groups.remove(&group_id);
+                continue;
+            };
+            let transfer_id = format!(
+                "rebalance-{}-{}",
+                Utc::now().timestamp_millis(),
+                candidate.source.key.as_ref().map_or(0, |key| key.worker_id),
+            );
+            let source_host = if candidate.source_endpoints.host.contains(':') {
+                format!("[{}]", candidate.source_endpoints.host)
+            } else {
+                candidate.source_endpoints.host.clone()
+            };
+            let source_url = format!(
+                "http://{}:{}",
+                source_host, candidate.source_endpoints.transfer_rpc_port
+            );
+            let request = TransferKvV2Request {
+                transfer_id,
+                compatibility_group_id: candidate.group_id,
+                source: Some(candidate.source),
+                target: Some(candidate.target),
+                target_endpoints: Some(candidate.target_endpoints),
+                blocks: candidate.blocks,
+                do_copy: true,
+                deadline_unix_ms: Utc::now().timestamp_millis() as u64
+                    + self.config.v2_transfer_rpc_timeout_ms,
+            };
+            let shared = self.clone();
+            tokio::spawn(async move {
+                let _group_guard = V2RebalanceGroupGuard {
+                    groups: shared.v2_rebalance_groups.clone(),
+                    group_id,
+                };
+                if let Err(error) = shared.execute_transfer_v2(&source_url, request).await {
+                    tracing::warn!("V2 rebalance transfer failed: {error:?}");
+                }
+                drop((_network_permit, _source_permit, _target_permit));
+            });
+        }
+    }
+
     pub async fn execute_transfer_v2(
         &self,
         source_rpc_url: &str,
@@ -320,7 +446,7 @@ impl Shared {
                     max_blocks: self.config.v2_transfer_max_blocks,
                     max_tokens: self.config.v2_transfer_max_tokens,
                     max_bytes: self.config.v2_transfer_max_bytes,
-                    estimated_bytes_per_token: KV_CACHE_BYTES_PER_TOKEN as u64,
+                    estimated_bytes_per_token: self.config.v2_rebalance_bytes_per_token,
                     timeout: Duration::from_millis(
                         self.config.v2_transfer_rpc_timeout_ms,
                     ),
@@ -751,5 +877,26 @@ impl Shared {
     /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
     async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
         self.kv_radix.add_server(token_hash, new_server_id);
+    }
+}
+
+fn transfer_slot_key(identity: &cedfs_proto::kvcache_v2::InstanceIdentityV2) -> String {
+    let key = identity.key.as_ref();
+    format!(
+        "{}:{}:{}",
+        key.map_or("", |value| value.lmcache_instance_id.as_str()),
+        key.map_or(0, |value| value.worker_id),
+        identity.epoch,
+    )
+}
+
+struct V2RebalanceGroupGuard {
+    groups: Arc<DashSet<Vec<u8>>>,
+    group_id: Vec<u8>,
+}
+
+impl Drop for V2RebalanceGroupGuard {
+    fn drop(&mut self) {
+        self.groups.remove(&self.group_id);
     }
 }
