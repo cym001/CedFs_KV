@@ -560,6 +560,8 @@ instance.state == READY
 
 最安全的运行时降级开关是 `enable_v2_transfer=false`：停止主动复制，但保留本地 LMCache cache、Dynamo 路由和 metadata 观测。
 
+阶段 F 实施记录（2026-08-06）：按本轮范围完成 F-01～F-05 与 F-07，F-06 明确不实施。metrics collector 已从无界逐事件 Vec 改为原子累计快照，并按配置周期持续输出；独立 HTTP `/live`、`/ready`、`/status` 区分进程存活、group inventory readiness 与详细控制面状态。CEDFS 对 block size、hash、seed、端口、TTL、budget 和时间间隔 fail-fast，LMCache 对 V2 identity、transfer endpoint、端口及 advertised endpoint 严格校验。V1/V2 注册和查询统一返回完整可路由 API URL；V1 与 legacy plugin flags 保留一个兼容发布周期并发出 deprecation，从未接线的旧 client/operation 文件和无用依赖已移除，已发布的 public 模块继续保留。新增 [`CEDFS_KV_OPERATIONS.md`](CEDFS_KV_OPERATIONS.md) 定义核心告警、探针、升级/回滚和 `enable_v2_transfer=false` 降级流程。按仓库开发约束，本阶段仅完成静态审查；未执行编译、测试、格式化、lint 或运行时命令。
+
 ## 6. 文件级改动清单
 
 ### 6.1 CedFs_KV

@@ -1,4 +1,9 @@
 use dashmap::{DashMap, DashSet};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -30,8 +35,6 @@ use crate::types::{BlockHashInfo, DataServer, MetaServer};
 
 pub mod config;
 pub mod types;
-//pub mod persistence;
-//pub mod client;
 pub mod convert;
 pub mod hash;
 pub mod kv_radix;
@@ -43,7 +46,6 @@ pub mod tokenizers;
 pub mod transfer;
 
 const MAX_PRESSURE_REBALANCE_ROUNDS: usize = 16;
-const METRICS_DELAY_SECS: u64 = 600;
 const KV_CACHE_BYTES_PER_TOKEN: f64 = 96.0 * 1024.0;
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
@@ -117,6 +119,21 @@ pub struct PressureMigrationResult {
     pub skipped_reason: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct LivenessStatus {
+    live: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlPlaneStatus {
+    live: bool,
+    ready: bool,
+    protocol_mode: &'static str,
+    v2_transfer_enabled: bool,
+    metrics: crate::metrics::MetricsSnapshot,
+    v2: Option<state::v2::V2StatusSnapshot>,
+}
+
 pub struct KVServer {
     pub shared: Shared,
 }
@@ -137,6 +154,11 @@ impl KVServer {
     pub async fn new(config_path: PathBuf) -> anyhow::Result<Self> {
         match Config::build_with_config(config_path) {
             Ok(config) => {
+                if config.protocol_mode == ProtocolMode::V1 {
+                    tracing::warn!(
+                        "protocol_mode=v1 is deprecated; migrate through dual_shadow to v2"
+                    );
+                }
                 let meta_servers = Arc::new(RwLock::new(Vec::new()));
                 meta_servers
                     .write()
@@ -167,11 +189,10 @@ impl KVServer {
                     "sha256_cbor" => HashAlgorithm::Sha256Cbor,
                     "sha256_cross_language" => HashAlgorithm::Sha256CrossLanguage,
                     _ => {
-                        tracing::warn!(
-                            "Unknown hash algorithm '{}', using default 'builtin'",
-                            config.hash_algorithm.clone()
-                        );
-                        HashAlgorithm::Builtin
+                        return Err(anyhow::anyhow!(
+                            "unsupported hash_algorithm: {}",
+                            config.hash_algorithm
+                        ));
                     },
                 };
 
@@ -267,6 +288,7 @@ impl KVServer {
         // start rpc server
         info!("start kvcache server on: {}", format!("{}:{}", ip, port));
         self.shared.launch_metrics_reporter();
+        self.shared.launch_status_server().await;
 
         let meta_server = KvMeta2MetaServer::new(KvCacheMetaService {
             shared: self.shared.clone(),
@@ -313,6 +335,28 @@ impl KVServer {
 }
 
 impl Shared {
+    async fn launch_status_server(&self) {
+        let app = Router::new()
+            .route("/live", get(liveness))
+            .route("/health", get(liveness))
+            .route("/ready", get(readiness))
+            .route("/status", get(control_plane_status))
+            .with_state(self.clone());
+        let address = std::net::SocketAddr::new(
+            self.config.local_meta_server.ip,
+            self.config.status_port,
+        );
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("failed to bind CEDFS status endpoint");
+        tracing::info!("CEDFS status endpoint listening on http://{address}");
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                tracing::error!("CEDFS status endpoint stopped: {error}");
+            }
+        });
+    }
+
     async fn run_v2_rebalance_worker(self) {
         let mut interval = tokio::time::interval(Duration::from_millis(
             self.config.v2_rebalance_interval_ms,
@@ -411,7 +455,11 @@ impl Shared {
                     groups: shared.v2_rebalance_groups.clone(),
                     group_id,
                 };
-                if let Err(error) = shared.execute_transfer_v2(&source_url, request).await {
+                let result = shared.execute_transfer_v2(&source_url, request).await;
+                if let Some(collector) = &shared.metrics_collector {
+                    collector.record_v2_rebalance(result.is_ok());
+                }
+                if let Err(error) = result {
                     tracing::warn!("V2 rebalance transfer failed: {error:?}");
                 }
                 drop((_network_permit, _source_permit, _target_permit));
@@ -453,6 +501,18 @@ impl Shared {
                 },
             )
             .await?;
+        if let Some(collector) = &self.metrics_collector {
+            for result in &response.results {
+                let status = usize::try_from(result.status)
+                    .ok()
+                    .filter(|status| *status <= 9)
+                    .unwrap_or(0);
+                collector.record_v2_transfer_result(
+                    status,
+                    result.bytes_transferred,
+                );
+            }
+        }
         state
             .commit_transfer_results(&request, &response.results)
             .map_err(anyhow::Error::msg)?;
@@ -465,67 +525,51 @@ impl Shared {
         };
 
         let kv_radix = self.kv_radix.clone();
+        let v2_state = self.v2_state.clone();
+        let interval_duration = Duration::from_millis(self.config.metrics_interval_ms);
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(METRICS_DELAY_SECS)).await;
-
-            let instance_snapshots = kv_radix.instance_metrics_snapshots();
-            if instance_snapshots.is_empty() {
-                tracing::error!("kv metrics [instance]: no registered instances");
-            } else {
-                for snapshot in &instance_snapshots {
-                    tracing::error!(
-                        "kv metrics [instance]: server_id={}, kv_block_count={}, total_heat={}",
-                        snapshot.server_id,
-                        snapshot.kv_block_count,
-                        snapshot.total_heat
+            let mut interval = tokio::time::interval(interval_duration);
+            loop {
+                interval.tick().await;
+                let instances = kv_radix.instance_metrics_snapshots();
+                let blocks = kv_radix.all_block_metrics();
+                let snapshot = collector.snapshot();
+                tracing::info!(
+                    v1_instances = instances.len(),
+                    v1_blocks = blocks.len(),
+                    v1_replicas = blocks
+                        .iter()
+                        .map(|block| u64::from(block.replica_count))
+                        .sum::<u64>(),
+                    replication_rpc_total = snapshot.replication_rpc_total,
+                    replication_rpc_blocks_total = snapshot.replication_rpc_blocks_total,
+                    migration_selection_total = snapshot.migration_selection_total,
+                    v2_transfer_blocks_total = snapshot.v2_transfer_blocks_total,
+                    v2_transfer_bytes_total = snapshot.v2_transfer_bytes_total,
+                    v2_transfer_failed_blocks_total = snapshot.v2_transfer_failed_blocks_total,
+                    v2_transfer_blocks_by_status = ?snapshot.v2_transfer_blocks_by_status,
+                    v2_rebalance_success_total = snapshot.v2_rebalance_success_total,
+                    v2_rebalance_failure_total = snapshot.v2_rebalance_failure_total,
+                    "cedfs metrics snapshot"
+                );
+                if let Some(state) = &v2_state {
+                    let status = state.status_snapshot();
+                    tracing::info!(
+                        ready = status.ready,
+                        groups = status.groups.len(),
+                        pending_inventory_syncs = status.pending_inventory_syncs,
+                        active_requests = status.active_requests,
+                        lease_expired_total = status.lease_expired_total,
+                        mutation_sequence_gap_total = status.mutation_sequence_gap_total,
+                        inventory_sync_success_total = status.inventory_sync_success_total,
+                        inventory_sync_failure_total = status.inventory_sync_failure_total,
+                        inventory_sync_blocks_total = status.inventory_sync_blocks_total,
+                        inventory_sync_duration_ms_total = status.inventory_sync_duration_ms_total,
+                        reconcile_mismatch_total = status.reconcile_mismatch_total,
+                        "cedfs v2 status snapshot"
                     );
                 }
-            }
-
-            let block_snapshots = kv_radix.all_block_metrics();
-            if block_snapshots.is_empty() {
-                tracing::error!("kv metrics [block]: no registered kv blocks");
-            } else {
-                for block in &block_snapshots {
-                    tracing::error!(
-                        "kv metrics [block]: seq_hash={:?}, replica_count={}, heat={}",
-                        block.seq_hash,
-                        block.replica_count,
-                        block.heat
-                    );
-                }
-            }
-
-            let replication_rpcs = collector.drain_replication_rpcs();
-            tracing::error!(
-                "kv metrics [replication_rpc]: count={}",
-                replication_rpcs.len()
-            );
-            for (index, record) in replication_rpcs.iter().enumerate() {
-                tracing::error!(
-                    "kv metrics [replication_rpc]: index={}, start={}, end={}, block_count={}",
-                    index,
-                    record.start.to_rfc3339(),
-                    record.end.to_rfc3339(),
-                    record.block_count
-                );
-            }
-
-            let migration_selections = collector.drain_migration_selections();
-            tracing::error!(
-                "kv metrics [migration_selection]: count={}",
-                migration_selections.len()
-            );
-            for (index, record) in migration_selections.iter().enumerate() {
-                tracing::error!(
-                    "kv metrics [migration_selection]: index={}, duration_ms={}, src_server_id={}, dst_server_id={}, candidate_count={}",
-                    index,
-                    record.duration.as_millis(),
-                    record.src_server_id,
-                    record.dst_server_id,
-                    record.candidate_count
-                );
             }
         });
     }
@@ -716,8 +760,6 @@ impl Shared {
                     result.success_count += migrated_count;
                     self.record_migration_selection(
                         selection_duration,
-                        src_server_id,
-                        dst_server_id,
                         candidate_count,
                     );
                 },
@@ -729,8 +771,6 @@ impl Shared {
                     result.success_count += migrated_count;
                     self.record_migration_selection(
                         selection_duration,
-                        src_server_id,
-                        dst_server_id,
                         candidate_count,
                     );
                     self.update_migration_pair_cooldown(migration_pair, migrated_token_count);
@@ -823,15 +863,11 @@ impl Shared {
     fn record_migration_selection(
         &self,
         duration: Duration,
-        src_server_id: u32,
-        dst_server_id: u32,
         candidate_count: usize,
     ) {
         if let Some(collector) = &self.metrics_collector {
             collector.record_migration_selection(MigrationSelectionRecord {
                 duration,
-                src_server_id,
-                dst_server_id,
                 candidate_count,
             });
         }
@@ -874,7 +910,7 @@ impl Shared {
         None
     }
 
-    /// 迁移完成后更新 KV 元数据（与 client 中 update_kv_meta_after_migration 一致）
+    /// 迁移完成后更新 V1 KV 元数据。
     async fn update_kv_meta_after_migration(&self, token_hash: [u8; 32], new_server_id: u32) {
         self.kv_radix.add_server(token_hash, new_server_id);
     }
@@ -898,5 +934,49 @@ struct V2RebalanceGroupGuard {
 impl Drop for V2RebalanceGroupGuard {
     fn drop(&mut self) {
         self.groups.remove(&self.group_id);
+    }
+}
+
+async fn liveness() -> Json<LivenessStatus> {
+    Json(LivenessStatus { live: true })
+}
+
+async fn readiness(State(shared): State<Shared>) -> (StatusCode, Json<ControlPlaneStatus>) {
+    let status = build_control_plane_status(&shared);
+    let code = if status.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(status))
+}
+
+async fn control_plane_status(State(shared): State<Shared>) -> Json<ControlPlaneStatus> {
+    Json(build_control_plane_status(&shared))
+}
+
+fn build_control_plane_status(shared: &Shared) -> ControlPlaneStatus {
+    let v2 = shared.v2_state.as_ref().map(|state| state.status_snapshot());
+    let ready = match shared.config.protocol_mode {
+        ProtocolMode::V1 => true,
+        ProtocolMode::DualShadow | ProtocolMode::V2 => {
+            v2.as_ref().is_some_and(|status| status.ready)
+        },
+    };
+    let protocol_mode = match shared.config.protocol_mode {
+        ProtocolMode::V1 => "v1",
+        ProtocolMode::DualShadow => "dual_shadow",
+        ProtocolMode::V2 => "v2",
+    };
+    ControlPlaneStatus {
+        live: true,
+        ready,
+        protocol_mode,
+        v2_transfer_enabled: shared.config.enable_v2_transfer,
+        metrics: shared
+            .metrics_collector
+            .as_ref()
+            .map_or_else(Default::default, |collector| collector.snapshot()),
+        v2,
     }
 }

@@ -20,25 +20,15 @@ derive_builder = { workspace = true }
 dashmap = "6.1.0"
 reqwest = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 sha2 = { workspace = true }
 serde_cbor = { workspace = true }
-scc = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tonic = { workspace = true }
-thiserror = { workspace = true }
-trait-variant = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokenizers = { workspace = true , features = ["http"]}
-warp = { workspace = true }
-bytes = { workspace = true }
 num-bigint = "0.4"
 axum = { version = "0.7", features = ["json"] }
-tower-http = { version = "0.5", features = ["cors"] }
-tower = "0.4"
-async-openai = { version = "0.33", features = ["completions"] }
-futures-util = "0.3"
 
 cedfs-proto = { version = "*", path = "../cedfs-proto" }
 

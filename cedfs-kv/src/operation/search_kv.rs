@@ -46,10 +46,9 @@ impl SearchKvOp {
                     if let Some(data_servers) = self.shared.global_data_server_collect.get(&meta_id)
                     {
                         if let Some(data_server) = data_servers.iter().find(|s| s.id == server_id) {
-                            let url = format!("{}:{}", data_server.ip, data_server.http_port);
                             let kv_block_pos = KvBlockPos {
                                 model_name: data_server.model_name.clone(),
-                                url,
+                                url: data_server.url.clone(),
                                 len: matched_length,
                             };
                             search_result.block_pos.push(kv_block_pos);

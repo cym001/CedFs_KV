@@ -92,6 +92,10 @@ pub struct Config {
     // 是否开启 metrics 定时统计
     pub enable_metrics: bool,
 
+    pub metrics_interval_ms: u64,
+
+    pub status_port: u16,
+
     // GlobalKV 控制面协议。默认保留 V1 行为。
     pub protocol_mode: ProtocolMode,
 
@@ -206,6 +210,8 @@ impl Config {
         let enable_metrics: bool = config
             .get("enable_metrics")
             .map_err(|e| ConfigError::MissingField(format!("enable_metrics: {}", e)))?;
+        let metrics_interval_ms = config.get("metrics_interval_ms").unwrap_or(60_000);
+        let status_port = config.get("status_port").unwrap_or(17072);
         let protocol_mode = ProtocolMode::parse(
             &config
                 .get::<String>("protocol_mode")
@@ -258,9 +264,49 @@ impl Config {
             .get("v2_network_concurrency")
             .unwrap_or(4);
 
-        if migration_delta <= 0.0 {
+        if !migration_delta.is_finite() || migration_delta <= 0.0 {
             return Err(ConfigError::BuildError(
-                "migration_delta must be greater than 0".to_string(),
+                "migration_delta must be finite and greater than 0".to_string(),
+            ));
+        }
+        if block_size == 0 || block_size > u32::MAX as usize {
+            return Err(ConfigError::BuildError(
+                "block_size must be between 1 and u32::MAX".to_string(),
+            ));
+        }
+        if !matches!(
+            hash_algorithm.as_str(),
+            "builtin" | "sha256" | "sha256_cbor" | "sha256_cross_language"
+        ) {
+            return Err(ConfigError::BuildError(format!(
+                "unsupported hash_algorithm: {hash_algorithm}"
+            )));
+        }
+        if hash_algorithm == "sha256_cbor" && python_hash_seed.is_none() {
+            return Err(ConfigError::BuildError(
+                "python_hash_seed is required for sha256_cbor".to_string(),
+            ));
+        }
+        if local_meta_server.port == 0 || status_port == 0 {
+            return Err(ConfigError::BuildError(
+                "local_meta_server.port and status_port must be greater than 0".to_string(),
+            ));
+        }
+        if local_meta_server.port == status_port {
+            return Err(ConfigError::BuildError(
+                "status_port must differ from local_meta_server.port".to_string(),
+            ));
+        }
+        if sync_interval == 0 || request_timeout == 0 || metrics_interval_ms == 0 {
+            return Err(ConfigError::BuildError(
+                "sync_interval, request_timeout, and metrics_interval_ms must be greater than 0"
+                    .to_string(),
+            ));
+        }
+        if replica_pull && (replica_pull_interval == 0 || replica_pull_count == 0) {
+            return Err(ConfigError::BuildError(
+                "replica_pull_interval and replica_pull_count must be greater than 0 when replica_pull is enabled"
+                    .to_string(),
             ));
         }
         if max_num_batch_tokens == 0 {
@@ -341,6 +387,11 @@ impl Config {
                 "v2_rebalance_max_blocks cannot exceed v2_transfer_max_blocks".to_string(),
             ));
         }
+        if v2_transfer_max_bytes < v2_rebalance_bytes_per_token {
+            return Err(ConfigError::BuildError(
+                "v2_transfer_max_bytes must fit at least one estimated token".to_string(),
+            ));
+        }
 
         Ok(ConfigBuilder::default()
             .loaded_config(config)
@@ -365,6 +416,8 @@ impl Config {
             .migration_check_request_interval(migration_check_request_interval)
             .migration_network_bandwidth_mbps(migration_network_bandwidth_mbps)
             .enable_metrics(enable_metrics)
+            .metrics_interval_ms(metrics_interval_ms)
+            .status_port(status_port)
             .protocol_mode(protocol_mode)
             .enable_v2_transfer(enable_v2_transfer)
             .v2_transfer_max_blocks(v2_transfer_max_blocks)

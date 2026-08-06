@@ -16,16 +16,16 @@ impl RegisterInstanceOp {
         // 1. 将data_server插入本地数据服务器集合中
         {
             let mut local_data_servers = self.shared.local_data_server_collect.write().await;
-            // 避免重复插入相同id的数据服务器
-            if !local_data_servers.iter().any(|ds| ds.id == data_server_id) {
+            if let Some(existing) = local_data_servers
+                .iter_mut()
+                .find(|server| server.id == data_server_id)
+            {
+                *existing = self.data_server.clone();
+                tracing::info!("Updated data_server {} endpoint", data_server_id);
+            } else {
                 local_data_servers.push(self.data_server.clone());
                 tracing::info!(
                     "Added data_server {} to local_data_server_collect",
-                    data_server_id
-                );
-            } else {
-                tracing::debug!(
-                    "Data_server {} already exists in local_data_server_collect",
                     data_server_id
                 );
             }
@@ -36,17 +36,14 @@ impl RegisterInstanceOp {
             self.shared.global_data_server_collect
                 .entry(meta_server_id)
                 .and_modify(|servers| {
-                    // 检查是否已存在
-                    if !servers.iter().any(|ds| ds.id == data_server_id) {
+                    if let Some(existing) =
+                        servers.iter_mut().find(|server| server.id == data_server_id)
+                    {
+                        *existing = self.data_server.clone();
+                    } else {
                         servers.push(self.data_server.clone());
                         tracing::info!(
                             "Added data_server {} to global_data_server_collect under meta_server {}",
-                            data_server_id,
-                            meta_server_id
-                        );
-                    } else {
-                        tracing::debug!(
-                            "Data_server {} already exists in global_data_server_collect under meta_server {}",
                             data_server_id,
                             meta_server_id
                         );

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::{mapref::entry::Entry, DashMap};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use cedfs_proto::kvcache_v2::cache_mutation_event_v2::Payload;
@@ -77,6 +78,32 @@ pub struct RebalanceCandidate {
     pub estimated_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupStatusSnapshot {
+    pub compatibility_group_id: String,
+    pub registered_instances: usize,
+    pub ready_instances: usize,
+    pub blocks: usize,
+    pub replicas: usize,
+    pub ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct V2StatusSnapshot {
+    pub meta_generation: String,
+    pub ready: bool,
+    pub pending_inventory_syncs: usize,
+    pub active_requests: usize,
+    pub lease_expired_total: u64,
+    pub mutation_sequence_gap_total: u64,
+    pub inventory_sync_success_total: u64,
+    pub inventory_sync_failure_total: u64,
+    pub inventory_sync_blocks_total: u64,
+    pub inventory_sync_duration_ms_total: u64,
+    pub reconcile_mismatch_total: u64,
+    pub groups: Vec<GroupStatusSnapshot>,
+}
+
 #[derive(Debug)]
 pub struct V2State {
     next_instance_handle: AtomicU64,
@@ -89,6 +116,13 @@ pub struct V2State {
     inventory_page_limit: u32,
     meta_generation: String,
     demand_window: Duration,
+    lease_expired_total: AtomicU64,
+    mutation_sequence_gap_total: AtomicU64,
+    inventory_sync_success_total: AtomicU64,
+    inventory_sync_failure_total: AtomicU64,
+    inventory_sync_blocks_total: AtomicU64,
+    inventory_sync_duration_ms_total: AtomicU64,
+    reconcile_mismatch_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -108,6 +142,7 @@ struct InventorySync {
     total_pages: u32,
     inventory_checksum: Vec<u8>,
     pages: HashMap<u32, Vec<BlockDescriptorV2>>,
+    started_at: Instant,
 }
 
 impl Default for V2State {
@@ -151,6 +186,13 @@ impl V2State {
             inventory_page_limit,
             meta_generation: format!("{}-{generation}", std::process::id()),
             demand_window,
+            lease_expired_total: AtomicU64::new(0),
+            mutation_sequence_gap_total: AtomicU64::new(0),
+            inventory_sync_success_total: AtomicU64::new(0),
+            inventory_sync_failure_total: AtomicU64::new(0),
+            inventory_sync_blocks_total: AtomicU64::new(0),
+            inventory_sync_duration_ms_total: AtomicU64::new(0),
+            reconcile_mismatch_total: AtomicU64::new(0),
         }
     }
 
@@ -172,8 +214,14 @@ impl V2State {
             return register_error(RegisterStatusV2::InvalidArgument, "missing endpoints");
         };
         if endpoints.host.is_empty()
+            || matches!(endpoints.host.as_str(), "0.0.0.0" | "::")
+            || endpoints.http_port == 0
             || endpoints.nixl_init_port == 0
             || endpoints.transfer_rpc_port == 0
+            || endpoints.http_port > u32::from(u16::MAX)
+            || endpoints.nixl_init_port > u32::from(u16::MAX)
+            || endpoints.transfer_rpc_port > u32::from(u16::MAX)
+            || !endpoints.api_path.starts_with('/')
         {
             return register_error(RegisterStatusV2::InvalidArgument, "invalid endpoints");
         }
@@ -356,14 +404,18 @@ impl V2State {
         request: BeginInventorySyncV2Request,
     ) -> BeginInventorySyncV2Response {
         let Ok((key, record)) = self.resolve_session(request.session.as_ref()) else {
-            return inventory_begin_error("invalid or expired instance session");
+            return self.inventory_failure(inventory_begin_error(
+                "invalid or expired instance session",
+            ));
         };
         let record = record.lock().unwrap();
         if record.group_id != request.compatibility_group_id
             || request.total_pages == 0
             || request.inventory_checksum.len() != 32
         {
-            return inventory_begin_error("invalid inventory declaration");
+            return self.inventory_failure(inventory_begin_error(
+                "invalid inventory declaration",
+            ));
         }
         let sync_id = format!("{}:{}", record.handle, request.base_event_seq);
         self.inventory_syncs.lock().unwrap().insert(
@@ -377,6 +429,7 @@ impl V2State {
                 total_pages: request.total_pages,
                 inventory_checksum: request.inventory_checksum,
                 pages: HashMap::new(),
+                started_at: Instant::now(),
             },
         );
         BeginInventorySyncV2Response {
@@ -392,20 +445,33 @@ impl V2State {
         request: UploadInventoryPageV2Request,
     ) -> UploadInventoryPageV2Response {
         let Ok((session_key, _record)) = self.resolve_session(request.session.as_ref()) else {
-            return inventory_page_error(request.page_id, "invalid or expired instance session");
+            return self.inventory_failure(inventory_page_error(
+                request.page_id,
+                "invalid or expired instance session",
+            ));
         };
         let mut syncs = self.inventory_syncs.lock().unwrap();
         let Some(sync) = syncs.get_mut(&request.sync_id) else {
-            return inventory_page_error(request.page_id, "unknown inventory sync");
+            return self.inventory_failure(inventory_page_error(
+                request.page_id,
+                "unknown inventory sync",
+            ));
         };
         if sync.instance_key != session_key
             || request.page_id >= sync.total_pages
             || request.blocks.len() > self.inventory_page_limit as usize
             || inventory_checksum(&request.blocks) != request.page_checksum
         {
-            return inventory_page_error(request.page_id, "invalid inventory page");
+            return self.inventory_failure(inventory_page_error(
+                request.page_id,
+                "invalid inventory page",
+            ));
         }
         if let Some(existing) = sync.pages.get(&request.page_id) {
+            if existing != &request.blocks {
+                self.inventory_sync_failure_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return UploadInventoryPageV2Response {
                 accepted: existing == &request.blocks,
                 page_id: request.page_id,
@@ -429,32 +495,44 @@ impl V2State {
         request: CommitInventorySyncV2Request,
     ) -> CommitInventorySyncV2Response {
         let Ok((key, record)) = self.resolve_session(request.session.as_ref()) else {
-            return inventory_commit_error("invalid or expired instance session");
+            return self.inventory_failure(inventory_commit_error(
+                "invalid or expired instance session",
+            ));
         };
         let mut syncs = self.inventory_syncs.lock().unwrap();
         let Some(sync) = syncs.remove(&request.sync_id) else {
-            return inventory_commit_error("unknown inventory sync");
+            return self.inventory_failure(inventory_commit_error("unknown inventory sync"));
         };
         if sync.instance_key != key || sync.pages.len() != sync.total_pages as usize {
-            return inventory_commit_error("inventory pages are incomplete");
+            return self.inventory_failure(inventory_commit_error(
+                "inventory pages are incomplete",
+            ));
         }
         let mut descriptors = Vec::with_capacity(sync.total_blocks as usize);
         for page_id in 0..sync.total_pages {
             let Some(page) = sync.pages.get(&page_id) else {
-                return inventory_commit_error("inventory page is missing");
+                return self.inventory_failure(inventory_commit_error(
+                    "inventory page is missing",
+                ));
             };
             descriptors.extend(page.iter().cloned());
         }
         if descriptors.len() != sync.total_blocks as usize
             || inventory_checksum(&descriptors) != sync.inventory_checksum
         {
-            return inventory_commit_error("inventory checksum/count mismatch");
+            self.reconcile_mismatch_total
+                .fetch_add(1, Ordering::Relaxed);
+            return self.inventory_failure(inventory_commit_error(
+                "inventory checksum/count mismatch",
+            ));
         }
         let mut record = record.lock().unwrap();
         if record.handle != sync.instance_handle
             || record.committed_event_seq > sync.base_event_seq
         {
-            return inventory_commit_error("inventory base event sequence is stale");
+            return self.inventory_failure(inventory_commit_error(
+                "inventory base event sequence is stale",
+            ));
         }
         let group = self.groups.entry(sync.group_id).or_default().clone();
         let mut live_blocks = group.blocks.lock().unwrap();
@@ -463,11 +541,15 @@ impl V2State {
         let mut available = HashSet::new();
         for descriptor in descriptors {
             if let Err(detail) = validate_descriptor(&descriptor, record.chunk_size, &available) {
-                return inventory_commit_error(&detail);
+                return self.inventory_failure(inventory_commit_error(&detail));
             }
             if let Some(existing) = staged.get(&descriptor.seq_hash) {
                 if !same_descriptor(&existing.descriptor, &descriptor) {
-                    return inventory_commit_error("inventory descriptor conflict");
+                    self.reconcile_mismatch_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return self.inventory_failure(inventory_commit_error(
+                        "inventory descriptor conflict",
+                    ));
                 }
             }
             let seq_hash = descriptor.seq_hash.clone();
@@ -485,6 +567,17 @@ impl V2State {
         *live_blocks = staged;
         record.committed_event_seq = sync.base_event_seq;
         record.inventory_ready = true;
+        self.inventory_sync_success_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.inventory_sync_blocks_total
+            .fetch_add(sync.total_blocks, Ordering::Relaxed);
+        self.inventory_sync_duration_ms_total.fetch_add(
+            sync.started_at
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
         CommitInventorySyncV2Response {
             committed: true,
             committed_event_seq: record.committed_event_seq,
@@ -633,7 +726,15 @@ impl V2State {
         for group in self.groups.iter() {
             cleanup_expired_demand(group.value(), self.demand_window);
         }
+        self.lease_expired_total
+            .fetch_add(removed_count as u64, Ordering::Relaxed);
         removed_count
+    }
+
+    fn inventory_failure<T>(&self, response: T) -> T {
+        self.inventory_sync_failure_total
+            .fetch_add(1, Ordering::Relaxed);
+        response
     }
 
     fn cleanup_expired_requests(&self) {
@@ -663,6 +764,70 @@ impl V2State {
 
     pub fn group_ids(&self) -> Vec<Vec<u8>> {
         self.groups.iter().map(|entry| entry.key().clone()).collect()
+    }
+
+    pub fn status_snapshot(&self) -> V2StatusSnapshot {
+        let now = Instant::now();
+        let mut instance_counts: HashMap<Vec<u8>, (usize, usize)> = HashMap::new();
+        for instance in self.instances.iter() {
+            let instance = instance.value().lock().unwrap();
+            if instance.lease_deadline <= now {
+                continue;
+            }
+            let counts = instance_counts.entry(instance.group_id.clone()).or_default();
+            counts.0 += 1;
+            if instance.inventory_ready {
+                counts.1 += 1;
+            }
+        }
+        let mut groups = Vec::new();
+        for group in self.groups.iter() {
+            let group_id = group.key();
+            let Some(&(registered_instances, ready_instances)) =
+                instance_counts.get(group_id.as_slice())
+            else {
+                continue;
+            };
+            let blocks = group.blocks.lock().unwrap();
+            groups.push(GroupStatusSnapshot {
+                compatibility_group_id: hex_bytes(group_id),
+                registered_instances,
+                ready_instances,
+                blocks: blocks.len(),
+                replicas: blocks.values().map(|block| block.replicas.len()).sum(),
+                ready: ready_instances == registered_instances,
+            });
+        }
+        groups.sort_by(|left, right| {
+            left.compatibility_group_id
+                .cmp(&right.compatibility_group_id)
+        });
+        V2StatusSnapshot {
+            meta_generation: self.meta_generation.clone(),
+            ready: !groups.is_empty() && groups.iter().all(|group| group.ready),
+            pending_inventory_syncs: self.inventory_syncs.lock().unwrap().len(),
+            active_requests: self.requests.len(),
+            lease_expired_total: self.lease_expired_total.load(Ordering::Relaxed),
+            mutation_sequence_gap_total: self
+                .mutation_sequence_gap_total
+                .load(Ordering::Relaxed),
+            inventory_sync_success_total: self
+                .inventory_sync_success_total
+                .load(Ordering::Relaxed),
+            inventory_sync_failure_total: self
+                .inventory_sync_failure_total
+                .load(Ordering::Relaxed),
+            inventory_sync_blocks_total: self
+                .inventory_sync_blocks_total
+                .load(Ordering::Relaxed),
+            inventory_sync_duration_ms_total: self
+                .inventory_sync_duration_ms_total
+                .load(Ordering::Relaxed),
+            reconcile_mismatch_total: self
+                .reconcile_mismatch_total
+                .load(Ordering::Relaxed),
+            groups,
+        }
     }
 
     pub fn select_rebalance_candidates(
@@ -844,6 +1009,8 @@ impl V2State {
             }
             if event.event_seq != next_seq {
                 instance.inventory_ready = false;
+                self.mutation_sequence_gap_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return mutation_error(
                     MutationStatusV2::SequenceGap,
                     instance.committed_event_seq,
@@ -1048,6 +1215,14 @@ fn rotate_demand_window(window: &mut DemandWindow, duration: Duration) {
         window.current = 0;
         window.started_at += duration;
     }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn instance_identity(record: &InstanceRecord) -> InstanceIdentityV2 {
@@ -1281,9 +1456,10 @@ mod tests {
             instance: Some(identity(instance_id, 0, "epoch-1")),
             endpoints: Some(InstanceEndpointsV2 {
                 host: "127.0.0.1".to_string(),
+                http_port: 8000,
                 nixl_init_port: 8001,
                 transfer_rpc_port: 8002,
-                ..Default::default()
+                api_path: "/v1".to_string(),
             }),
             fingerprint: Some(CompatibilityFingerprintV2 {
                 model_name: model.to_string(),
@@ -1725,5 +1901,32 @@ mod tests {
         rotate_demand_window(&mut window, duration);
         assert_eq!(window.current, 0);
         assert_eq!(window.previous, 0);
+    }
+
+    #[test]
+    fn status_distinguishes_registered_from_inventory_ready() {
+        let state = V2State::default();
+        state.register(register_request("instance-a", "model-a"));
+        let recovering = state.status_snapshot();
+        assert!(!recovering.ready);
+        assert_eq!(recovering.groups.len(), 1);
+        assert_eq!(recovering.groups[0].ready_instances, 0);
+
+        mark_ready(&state, "instance-a");
+        let ready = state.status_snapshot();
+        assert!(ready.ready);
+        assert_eq!(ready.groups[0].ready_instances, 1);
+        assert_eq!(ready.inventory_sync_success_total, 1);
+    }
+
+    #[test]
+    fn registration_rejects_wildcard_advertised_endpoint() {
+        let state = V2State::default();
+        let mut request = register_request("instance-a", "model-a");
+        request.endpoints.as_mut().unwrap().host = "0.0.0.0".to_string();
+        assert_eq!(
+            state.register(request).status,
+            RegisterStatusV2::InvalidArgument as i32
+        );
     }
 }

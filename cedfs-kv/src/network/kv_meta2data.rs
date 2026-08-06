@@ -44,12 +44,55 @@ impl KvMeta2Data for KvCacheDataService {
         request: Request<RegisterInstanceRequest>,
     ) -> Result<Response<RegisterInstanceResponse>, Status> {
         tracing::debug!("register_instance request received");
-        let _req = request.into_inner();
-        let _op = crate::operation::register_instance::RegisterInstanceOp {
-            data_server: _req.data_server.unwrap().into(),
+        let request = request.into_inner();
+        let data_server = request
+            .data_server
+            .ok_or_else(|| Status::invalid_argument("missing data_server"))?;
+        let ip = data_server
+            .ip
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| Status::invalid_argument("data_server.ip must be an IP address"))?;
+        let http_port = u16::try_from(data_server.http_port)
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| Status::invalid_argument("invalid data_server.http_port"))?;
+        let init_port = u16::try_from(data_server.init_port)
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| Status::invalid_argument("invalid data_server.init_port"))?;
+        let rpc_port = u16::try_from(data_server.rpc_port)
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| Status::invalid_argument("invalid data_server.rpc_port"))?;
+        let url = reqwest::Url::parse(&data_server.url)
+            .map_err(|_| Status::invalid_argument("data_server.url must be absolute"))?;
+        let url_host = url
+            .host_str()
+            .unwrap_or_default()
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        if !matches!(url.scheme(), "http" | "https")
+            || url_host != data_server.ip.as_str()
+            || url.port_or_known_default() != Some(http_port)
+            || data_server.model_name.is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "data_server endpoint/model fields are inconsistent",
+            ));
+        }
+        let op = crate::operation::register_instance::RegisterInstanceOp {
+            data_server: crate::types::DataServer {
+                id: data_server.id,
+                ip,
+                http_port,
+                init_port,
+                rpc_port,
+                model_name: data_server.model_name,
+                url: data_server.url,
+            },
             shared: self.shared.clone(),
         };
-        let resp = _op.run().await;
+        let resp = op.run().await;
         match resp {
             Ok(_) => Ok(Response::new(RegisterInstanceResponse { success: true })),
             Err(e) => Err(Status::internal(e.to_string())),
